@@ -513,6 +513,7 @@ class _Parser:
             is_list = True
             list_expr = self.top_expr()
             if self.token_is('separator'):
+                self.consume()
                 separator = self.expr()
             else:
                 separator = None
@@ -938,8 +939,8 @@ class _Interpreter:
                 range_gen = range(start_val, stop_val, step_val)
                 if len(range_gen) > limit_val:
                     self.error(
-                        _("{0}: the range length ({1}) is larger than the limit ({2})").format
-                            ('for', str(len(range_gen)), str(limit_val)), line_number)
+                        _("{0}: the range length ({1}) is larger than the limit ({2})").format(
+                            'for', str(len(range_gen)), str(limit_val)), line_number)
                 for x in (str(x) for x in range_gen):
                     try:
                         if (self.break_reporter):
