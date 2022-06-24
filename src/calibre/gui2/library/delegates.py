@@ -12,7 +12,7 @@ from qt.core import (Qt, QApplication, QStyle, QIcon,  QDoubleSpinBox, QStyleOpt
         QAbstractTextDocumentLayout, QFont, QFontInfo, QDate, QDateTimeEdit, QDateTime, QEvent,
         QStyleOptionComboBox, QStyleOptionSpinBox, QLocale, QSize, QLineEdit, QDialog, QPalette)
 
-from calibre.ebooks.metadata import rating_to_stars
+from calibre.ebooks.metadata import rating_to_stars, title_sort
 from calibre.gui2 import UNDEFINED_QDATETIME, rating_font, gprefs
 from calibre.constants import iswindows
 from calibre.gui2.widgets import EnLineEdit
@@ -286,6 +286,8 @@ class PubDateDelegate(QStyledItemDelegate, UpdateEditorGeometry):  # {{{
 
 class TextDelegate(QStyledItemDelegate, UpdateEditorGeometry):  # {{{
 
+    use_title_sort = False
+
     def __init__(self, parent):
         '''
         Delegate for text data. If auto_complete_function needs to return a list
@@ -301,7 +303,10 @@ class TextDelegate(QStyledItemDelegate, UpdateEditorGeometry):  # {{{
 
     def createEditor(self, parent, option, index):
         if self.auto_complete_function:
-            editor = EditWithComplete(parent)
+            if self.use_title_sort:
+                editor = EditWithComplete(parent, sort_func=title_sort)
+            else:
+                editor = EditWithComplete(parent)
             editor.set_separator(None)
             editor.set_clear_button_enabled(False)
             complete_items = [i[1] for i in self.auto_complete_function()]
@@ -325,6 +330,8 @@ class TextDelegate(QStyledItemDelegate, UpdateEditorGeometry):  # {{{
 
 
 class SeriesDelegate(TextDelegate):  # {{{
+
+    use_title_sort = True
 
     def initStyleOption(self, option, index):
         TextDelegate.initStyleOption(self, option, index)
@@ -461,6 +468,7 @@ class CcTextDelegate(QStyledItemDelegate, UpdateEditorGeometry):  # {{{
     '''
     Delegate for text data.
     '''
+    use_title_sort = False
 
     def __init__(self, parent):
         QStyledItemDelegate.__init__(self, parent)
@@ -471,7 +479,10 @@ class CcTextDelegate(QStyledItemDelegate, UpdateEditorGeometry):  # {{{
         col = m.column_map[index.column()]
         key = m.db.field_metadata.key_to_label(col)
         if m.db.field_metadata[col]['datatype'] != 'comments':
-            editor = EditWithComplete(parent)
+            if self.use_title_sort:
+                editor = EditWithComplete(parent, sort_func=title_sort)
+            else:
+                editor = EditWithComplete(parent)
             editor.set_separator(None)
             editor.set_clear_button_enabled(False)
             complete_items = sorted(list(m.db.all_custom(label=key)), key=sort_key)
@@ -497,6 +508,8 @@ class CcTextDelegate(QStyledItemDelegate, UpdateEditorGeometry):  # {{{
 
 
 class CcSeriesDelegate(CcTextDelegate):  # {{{
+
+    use_title_sort = True
 
     def initStyleOption(self, option, index):
         CcTextDelegate.initStyleOption(self, option, index)
