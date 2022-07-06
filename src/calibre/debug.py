@@ -64,9 +64,6 @@ Everything after the -- is passed to the script.
             help=_('Add a simple plugin (i.e. a plugin that consists of only a '
             '.py file), by specifying the path to the py file containing the '
             'plugin code.'))
-    parser.add_option('--reinitialize-db', default=None,
-            help=_('Re-initialize the sqlite calibre database at the '
-            'specified path. Useful to recover from db corruption.'))
     parser.add_option('-m', '--inspect-mobi', action='store_true',
             default=False,
             help=_('Inspect the MOBI file(s) at the specified path(s)'))
@@ -118,45 +115,6 @@ Everything after the -- is passed to the script.
     return parser
 
 
-def reinit_db(dbpath):
-    from contextlib import closing
-    from calibre import as_unicode
-    from calibre.ptempfile import TemporaryFile
-    from calibre.utils.filenames import atomic_rename
-    # We have to use sqlite3 instead of apsw as apsw has no way to discard
-    # problematic statements
-    import sqlite3
-    from calibre.library.sqlite import do_connect
-    with TemporaryFile(suffix='_tmpdb.db', dir=os.path.dirname(dbpath)) as tmpdb:
-        with closing(do_connect(dbpath)) as src, closing(do_connect(tmpdb)) as dest:
-            dest.execute('create temporary table temp_sequence(id INTEGER PRIMARY KEY AUTOINCREMENT)')
-            dest.commit()
-            uv = int(src.execute('PRAGMA user_version;').fetchone()[0])
-            dump = src.iterdump()
-            last_restore_error = None
-            while True:
-                try:
-                    statement = next(dump)
-                except StopIteration:
-                    break
-                except sqlite3.OperationalError as e:
-                    prints('Failed to dump a line:', as_unicode(e))
-                if last_restore_error:
-                    prints('Failed to restore a line:', last_restore_error)
-                    last_restore_error = None
-                try:
-                    dest.execute(statement)
-                except sqlite3.OperationalError as e:
-                    last_restore_error = as_unicode(e)
-                    # The dump produces an extra commit at the end, so
-                    # only print this error if there are more
-                    # statements to be restored
-            dest.execute('PRAGMA user_version=%d;'%uv)
-            dest.commit()
-        atomic_rename(tmpdb, dbpath)
-    prints('Database successfully re-initialized')
-
-
 def debug_device_driver():
     from calibre.devices import debug
     debug(ioreg_to_tmp=True, buf=sys.stdout)
@@ -185,18 +143,12 @@ def print_basic_debug_info(out=None):
         out = sys.stdout
     out = functools.partial(prints, file=out)
     import platform
-    from contextlib import suppress
     from calibre.constants import (__appname__, get_version, isportable, ismacos,
-                                   isfrozen, is64bit)
+                                   isfrozen)
     from calibre.utils.localization import set_translators
     out(__appname__, get_version(), 'Portable' if isportable else '',
-        'embedded-python:', isfrozen, 'is64bit:', is64bit)
+        'embedded-python:', isfrozen)
     out(platform.platform(), platform.system(), platform.architecture())
-    if iswindows and not is64bit:
-        from calibre_extensions.winutil import is_wow64_process
-        with suppress(Exception):
-            if is_wow64_process():
-                out('32bit process running on 64bit windows')
     out(platform.system_alias(platform.system(), platform.release(),
             platform.version()))
     out('Python', platform.python_version())
@@ -283,8 +235,6 @@ def main(args=sys.argv):
         prints('CALIBRE_RESOURCES_PATH='+sys.resources_location)
         prints('CALIBRE_EXTENSIONS_PATH='+sys.extensions_location)
         prints('CALIBRE_PYTHON_PATH='+os.pathsep.join(sys.path))
-    elif opts.reinitialize_db is not None:
-        reinit_db(opts.reinitialize_db)
     elif opts.inspect_mobi:
         for path in args[1:]:
             inspect_mobi(path)

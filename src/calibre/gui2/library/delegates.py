@@ -157,7 +157,7 @@ ClearingDoubleSpinBox = make_clearing_spinbox(QDoubleSpinBox)
 
 
 def check_key_modifier(which_modifier):
-    v = int(QApplication.keyboardModifiers() & (Qt.KeyboardModifier.ControlModifier + Qt.KeyboardModifier.ShiftModifier))
+    v = QApplication.keyboardModifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
     return v == which_modifier
 
 
@@ -240,7 +240,7 @@ class DateDelegate(QStyledItemDelegate, UpdateEditorGeometry):  # {{{
     def setEditorData(self, editor, index):
         if check_key_modifier(Qt.KeyboardModifier.ControlModifier):
             val = UNDEFINED_QDATETIME
-        elif check_key_modifier(Qt.KeyboardModifier.ShiftModifier + Qt.KeyboardModifier.ControlModifier):
+        elif check_key_modifier(Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier):
             val = now()
         else:
             val = index.data(Qt.ItemDataRole.EditRole)
@@ -273,7 +273,7 @@ class PubDateDelegate(QStyledItemDelegate, UpdateEditorGeometry):  # {{{
         val = index.data(Qt.ItemDataRole.EditRole)
         if check_key_modifier(Qt.KeyboardModifier.ControlModifier):
             val = UNDEFINED_QDATETIME
-        elif check_key_modifier(Qt.KeyboardModifier.ShiftModifier + Qt.KeyboardModifier.ControlModifier):
+        elif check_key_modifier(Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier):
             val = now()
         elif is_date_undefined(val):
             val = QDate.currentDate()
@@ -446,7 +446,7 @@ class CcDateDelegate(QStyledItemDelegate, UpdateEditorGeometry):  # {{{
     def setEditorData(self, editor, index):
         if check_key_modifier(Qt.KeyboardModifier.ControlModifier):
             val = UNDEFINED_QDATETIME
-        elif check_key_modifier(Qt.KeyboardModifier.ShiftModifier + Qt.KeyboardModifier.ControlModifier):
+        elif check_key_modifier(Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier):
             val = now()
         else:
             val = index.data(Qt.ItemDataRole.EditRole)
@@ -717,13 +717,13 @@ class CcBoolDelegate(QStyledItemDelegate, UpdateEditorGeometry):  # {{{
     def createEditor(self, parent, option, index):
         editor = DelegateCB(parent)
         items = [_('Yes'), _('No'), _('Undefined')]
-        icons = [I('ok.png'), I('list_remove.png'), I('blank.png')]
+        icons = ['ok.png', 'list_remove.png', 'blank.png']
         if not index.model().db.new_api.pref('bools_are_tristate'):
             items = items[:-1]
             icons = icons[:-1]
         self.longest_text = ''
         for icon, text in zip(icons, items):
-            editor.addItem(QIcon(icon), text)
+            editor.addItem(QIcon.ic(icon), text)
             if len(text) > len(self.longest_text):
                 self.longest_text = text
         return editor
@@ -775,7 +775,7 @@ class CcTemplateDelegate(QStyledItemDelegate):  # {{{
         editor = TemplateDialog(parent, text, mi)
         editor.setWindowTitle(_("Edit template"))
         editor.textbox.setTabChangesFocus(False)
-        editor.textbox.setTabStopWidth(20)
+        editor.textbox.setTabStopDistance(20)
         d = editor.exec()
         if d:
             m.setData(index, (editor.rule[1]), Qt.ItemDataRole.EditRole)
