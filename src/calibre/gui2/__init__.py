@@ -11,12 +11,12 @@ import threading
 from contextlib import contextmanager, suppress
 from functools import lru_cache
 from qt.core import (
-    QT_VERSION, QApplication, QBuffer, QByteArray, QColor, QDateTime,
-    QDesktopServices, QDialog, QDialogButtonBox, QEvent, QFile, QFileDialog,
-    QFileIconProvider, QFileInfo, QFont, QFontDatabase, QFontInfo, QFontMetrics,
-    QGuiApplication, QIcon, QIODevice, QLocale, QNetworkProxyFactory, QObject,
-    QPalette, QResource, QSettings, QSocketNotifier, QStringListModel, QStyle, Qt,
-    QThread, QTimer, QTranslator, QUrl, pyqtSignal, pyqtSlot
+    QApplication, QBuffer, QByteArray, QColor, QDateTime, QDesktopServices, QDialog,
+    QDialogButtonBox, QEvent, QFile, QFileDialog, QFileIconProvider, QFileInfo,
+    QFont, QFontDatabase, QFontInfo, QFontMetrics, QGuiApplication, QIcon, QIODevice,
+    QLocale, QNetworkProxyFactory, QObject, QPalette, QResource, QSettings,
+    QSocketNotifier, QStringListModel, QStyle, Qt, QThread, QTimer, QTranslator,
+    QUrl, pyqtSignal, pyqtSlot
 )
 from threading import Lock, RLock
 
@@ -33,8 +33,8 @@ from calibre.gui2.linux_file_dialogs import (
 from calibre.gui2.palette import dark_palette, fix_palette_colors
 from calibre.gui2.qt_file_dialogs import FileDialog
 from calibre.ptempfile import base_dir
-from calibre.utils.config_base import tweaks
 from calibre.utils.config import Config, ConfigProxy, JSONConfig, dynamic
+from calibre.utils.config_base import tweaks
 from calibre.utils.date import UNDEFINED_DATE
 from calibre.utils.file_type_icons import EXT_MAP
 from calibre.utils.localization import get_lang
@@ -1042,7 +1042,10 @@ class Application(QApplication):
     shutdown_signal_received = pyqtSignal()
     palette_changed = pyqtSignal()
 
-    def __init__(self, args, force_calibre_style=False, override_program_name=None, headless=False, color_prefs=gprefs, windows_app_uid=None):
+    def __init__(self, args=(), force_calibre_style=False, override_program_name=None, headless=False, color_prefs=gprefs, windows_app_uid=None):
+        if not args:
+            args = sys.argv[:1]
+        args = [args[0]]
         if ismacos and not headless:
             from calibre_extensions.cocoa import set_appearance
             if gprefs['color_palette'] != 'system':
@@ -1059,16 +1062,31 @@ class Application(QApplication):
                 if set_app_uid(windows_app_uid):
                     self.windows_app_uid = windows_app_uid
         self.file_event_hook = None
-        if isfrozen and QT_VERSION <= 0x050700 and 'wayland' in os.environ.get('QT_QPA_PLATFORM', ''):
-            os.environ['QT_QPA_PLATFORM'] = 'xcb'
         if override_program_name:
             args = [override_program_name] + args[1:]
         if headless:
-            if not args:
-                args = sys.argv[:1]
             args.extend(['-platformpluginpath', plugins_loc, '-platform', 'headless'])
+        else:
+            if iswindows:
+                # passing darkmode=1 turns on dark window frames when windows
+                # is dark and darkmode=2 makes everything dark, but we have our
+                # own dark mode implementation when using calibre style so
+                # prefer that and use darkmode=1
+                if gprefs['ui_style'] == 'system' and not force_calibre_style:
+                    args.extend(['-platform', 'windows:darkmode=2'])
+                else:
+                    args.extend(['-platform', 'windows:darkmode=1'])
+            if not iswindows and not ismacos and not os.environ.get('QT_QPA_PLATFORM'):
+                # Various issues in Wayland make it unuseable so prevent Qt from
+                # using Wayland unless the user asks for it explicitly.
+                # In KDE right clicking on the book list causes left clicks on it
+                # to stop working till kwin is restarted. On GNOME there are no
+                # native window decorations. There have been reports of left clicks
+                # not working in GNOME though I cannot reproduce. So force use of
+                # XWayland.
+                args.extend(['-platform', 'xcb'])
+
         self.headless = headless
-        qargs = [i.encode('utf-8') if isinstance(i, str) else i for i in args]
         from calibre_extensions import progress_indicator
         self.pi = progress_indicator
         QApplication.setOrganizationName('calibre-ebook.com')
@@ -1078,7 +1096,7 @@ class Application(QApplication):
         if override_program_name and hasattr(QApplication, 'setDesktopFileName'):
             QApplication.setDesktopFileName(override_program_name)
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)  # needed for webengine
-        QApplication.__init__(self, qargs)
+        QApplication.__init__(self, args)
         self.original_palette = self.palette()
         self.original_palette_modified = fix_palette_colors(self.original_palette)
         if iswindows:
@@ -1099,6 +1117,7 @@ class Application(QApplication):
                 show_temp_dir_error(err)
             raise SystemExit('Failed to create temporary folder')
         if DEBUG and not headless:
+            prints('QPA platform:', self.platformName())
             prints('devicePixelRatio:', self.devicePixelRatio())
             s = self.primaryScreen()
             if s:
