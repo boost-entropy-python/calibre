@@ -163,8 +163,9 @@ class IconResourceManager:
             return QIcon(name)
         if self.override_icon_path:
             q = os.path.join(self.override_icon_path, name)
-            if os.path.exists(q):
-                return QIcon(q)
+            qi = QIcon(q)
+            if qi.is_ok():
+                return qi
         icon_name = os.path.splitext(name.replace('\\', '__').replace('/', '__'))[0]
         ans = QIcon.fromTheme(icon_name)
         if not ans.is_ok():
@@ -776,24 +777,29 @@ class FileIconProvider(QFileIconProvider):
     ICONS = EXT_MAP
 
     def __init__(self):
-        QFileIconProvider.__init__(self)
+        super().__init__()
         self.icons = {k:f'mimetypes/{v}.png' for k, v in self.ICONS.items()}
         self.icons['calibre'] = I('lt.png', allow_user_override=False)
         for i in ('dir', 'default', 'zero'):
             self.icons[i] = QIcon.ic(self.icons[i])
 
     def key_from_ext(self, ext):
-        key = ext if ext in list(self.icons.keys()) else 'default'
+        key = ext if ext in self.icons else 'default'
         if key == 'default' and ext.count('.') > 0:
             ext = ext.rpartition('.')[2]
-            key = ext if ext in list(self.icons.keys()) else 'default'
+            key = ext if ext in self.icons else 'default'
+        if key == 'default':
+            key = ext
         return key
 
     def cached_icon(self, key):
-        candidate = self.icons[key]
+        candidate = self.icons.get(key)
         if isinstance(candidate, QIcon):
             return candidate
+        candidate = candidate or f'mimetypes/{key}.png'
         icon = QIcon.ic(candidate)
+        if not icon.is_ok():
+            icon = self.icons['default']
         self.icons[key] = icon
         return icon
 
@@ -803,10 +809,9 @@ class FileIconProvider(QFileIconProvider):
 
     def load_icon(self, fileinfo):
         key = 'default'
-        icons = self.icons
         if fileinfo.isSymLink():
             if not fileinfo.exists():
-                return icons['zero']
+                return self.icons['zero']
             fileinfo = QFileInfo(fileinfo.readLink())
         if fileinfo.isDir():
             key = 'dir'
@@ -1328,7 +1333,20 @@ class Application(QApplication):
             '#FF2400' if is_error else '#50c878')
 
     def load_calibre_style(self):
+        from calibre.utils.resources import get_user_path
         icon_map = self.__icon_map_memory_ = {}
+        user_path = get_user_path()
+        if user_path:
+            user_path = os.path.join(user_path, 'images')
+
+        @lru_cache(maxsize=64)
+        def check_for_custom_icon(v):
+            if user_path:
+                q = os.path.join(user_path, v)
+                if os.path.exists(q):
+                    return q
+            return v.rpartition('.')[0]
+
         for k, v in {
             'DialogYesButton': 'ok.png',
             'DialogNoButton': 'window-close.png',
@@ -1349,7 +1367,7 @@ class Application(QApplication):
             'ToolBarHorizontalExtensionButton': 'v-ellipsis.png',
             'ToolBarVerticalExtensionButton': 'h-ellipsis.png',
         }.items():
-            icon_map[getattr(QStyle.StandardPixmap, 'SP_'+k).value] = v.rpartition('.')[0]
+            icon_map[getattr(QStyle.StandardPixmap, 'SP_'+k).value] = check_for_custom_icon(v)
         transient_scroller = 0
         if ismacos:
             from calibre_extensions.cocoa import transient_scroller
