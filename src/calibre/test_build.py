@@ -73,11 +73,10 @@ class BuildTest(unittest.TestCase):
         del CHMFile, chmlib
 
     def test_chardet(self):
-        from cchardet import detect
+        from calibre_extensions.uchardet import detect
         raw = 'mūsi Füße'.encode()
-        data = detect(raw)
-        self.assertEqual(data['encoding'].lower(), 'utf-8')
-        self.assertGreater(data['confidence'], 0.5)
+        enc = detect(raw).lower()
+        self.assertEqual(enc, 'utf-8')
         # The following is used by html5lib
         from chardet.universaldetector import UniversalDetector
         detector = UniversalDetector()
@@ -320,6 +319,7 @@ class BuildTest(unittest.TestCase):
         test()
 
         from calibre.gui2 import ensure_app, destroy_app
+        from calibre.utils.webengine import setup_profile
         display_env_var = os.environ.pop('DISPLAY', None)
         try:
             ensure_app()
@@ -333,6 +333,7 @@ class BuildTest(unittest.TestCase):
             na = QNetworkAccessManager()
             self.assertTrue(hasattr(na, 'sslErrors'), 'Qt not compiled with openssl')
             p = QWebEnginePage()
+            setup_profile(p.profile())
 
             def callback(result):
                 callback.result = result
