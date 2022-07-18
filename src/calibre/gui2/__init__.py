@@ -1333,9 +1333,8 @@ class Application(QApplication):
             '#FF2400' if is_error else '#50c878')
 
     def load_calibre_style(self):
-        from calibre.utils.resources import get_user_path
         icon_map = self.__icon_map_memory_ = {}
-        user_path = get_user_path()
+        user_path = icon_resource_manager.override_icon_path
         if user_path:
             user_path = os.path.join(user_path, 'images')
 
@@ -1366,6 +1365,17 @@ class Application(QApplication):
             'LineEditClearButton': 'clear_left.png',
             'ToolBarHorizontalExtensionButton': 'v-ellipsis.png',
             'ToolBarVerticalExtensionButton': 'h-ellipsis.png',
+            'FileDialogBack': 'back.png',
+            'ArrowRight': 'forward.png',
+            'ArrowLeft': 'back.png',
+            'ArrowBack': 'back.png',
+            'ArrowForward': 'forward.png',
+            'ArrowUp': 'arrow-up.png',
+            'ArrowDown': 'arrow-down.png',
+            'FileDialogToParent': 'arrow-up.png',
+            'FileDialogNewFolder': 'tb_folder.png',
+            'FileDialogListView': 'format-list-unordered.png',
+            'FileDialogDetailedView': 'format-list-ordered.png',
         }.items():
             icon_map[getattr(QStyle.StandardPixmap, 'SP_'+k).value] = check_for_custom_icon(v)
         transient_scroller = 0
