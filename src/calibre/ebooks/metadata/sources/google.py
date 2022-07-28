@@ -6,6 +6,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 import hashlib
 import re
 import time
+import regex
 try:
     from queue import Empty, Queue
 except ImportError:
@@ -185,7 +186,7 @@ def to_metadata(browser, log, entry_, timeout):  # {{{
 class GoogleBooks(Source):
 
     name = 'Google'
-    version = (1, 0, 4)
+    version = (1, 0, 6)
     minimum_calibre_version = (2, 80, 0)
     description = _('Downloads metadata and covers from Google Books')
 
@@ -376,6 +377,7 @@ class GoogleBooks(Source):
     ):
         isbn = check_isbn(identifiers.get('isbn', None))
         q = []
+        strip_punc_pat = regex.compile(r'[\p{C}|\p{M}|\p{P}|\p{S}|\p{Z}]+', regex.UNICODE)
 
         def to_check_tokens(*tokens):
             for t in tokens:
@@ -384,7 +386,7 @@ class GoogleBooks(Source):
                 t = t.lower()
                 if t in ('and', 'not', 'the'):
                     continue
-                yield t.strip(':')
+                yield strip_punc_pat.sub('', t)
 
         check_tokens = set()
         if isbn is not None:
@@ -411,7 +413,7 @@ class GoogleBooks(Source):
         google_ids = []
         for q in se.google_parse_results(root, r[0], log=log, ignore_uncached=False):
             m = pat.search(q.url)
-            if m is None:
+            if m is None or not q.url.startswith('https://books.google'):
                 continue
             google_ids.append(m.group(1))
 
@@ -439,8 +441,8 @@ class GoogleBooks(Source):
                             continue
                     ans.source_relevance = relevance
                     goog = ans.identifiers['google']
-                    for isbn in getattr(ans, 'all_isbns', []):
-                        self.cache_isbn_to_identifier(isbn, goog)
+                    for isbnx in getattr(ans, 'all_isbns', []):
+                        self.cache_isbn_to_identifier(isbnx, goog)
                     if getattr(ans, 'has_google_cover', False):
                         self.cache_identifier_to_cover_url(
                             goog, self.GOOGLE_COVER % goog
@@ -454,6 +456,7 @@ class GoogleBooks(Source):
                 break
             if not found and isbn and (title or authors):
                 return self.identify_via_web_search(log, result_queue, abort, title, authors, {}, timeout)
+    # }}}
 
     def identify(  # {{{
         self,
