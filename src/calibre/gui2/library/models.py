@@ -312,7 +312,7 @@ class BooksModel(QAbstractTableModel):  # {{{
             if font_type != 'normal':
                 self.styled_columns[colname] = getattr(self, f'{font_type}_font')
                 old[colname] = font_type
-            self.db.new_api.set_pref('styled_columns', old)
+            db.set_pref('styled_columns', old)
             col = self.column_map.index(colname)
             for row in range(self.rowCount(QModelIndex())):
                 self.dataChanged.emit(self.index(row, col), self.index(row,
@@ -966,6 +966,8 @@ class BooksModel(QAbstractTableModel):  # {{{
         self.column_to_dc_decorator_map = [self.dc_decorator.get(col, None) for col in self.column_map]
 
     def data(self, index, role):
+        if self.db.new_api.is_doing_rebuild_or_vacuum:
+            return None
         col = index.column()
         # in obscure cases where custom columns are both edited and added, for a time
         # the column map does not accurately represent the screen. In these cases,

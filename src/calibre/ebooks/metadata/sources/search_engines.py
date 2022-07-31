@@ -24,7 +24,7 @@ from calibre.ebooks.chardet import xml_to_unicode
 from calibre.utils.lock import ExclusiveFile
 from calibre.utils.random_ua import accept_header_for_ua
 
-current_version = (1, 0, 17)
+current_version = (1, 0, 18)
 minimum_calibre_version = (2, 80, 0)
 
 
@@ -32,7 +32,7 @@ Result = namedtuple('Result', 'url title cached_url')
 
 
 @contextmanager
-def rate_limit(name='test', time_between_visits=1, max_wait_seconds=5 * 60, sleep_time=0.2):
+def rate_limit(name='test', time_between_visits=2, max_wait_seconds=5 * 60, sleep_time=0.2):
     lock_file = os.path.join(cache_dir(), 'search-engines.' + name + '.lock')
     with ExclusiveFile(lock_file, timeout=max_wait_seconds, sleep_time=sleep_time) as f:
         try:
@@ -308,7 +308,9 @@ def google_parse_results(root, raw, log=prints, ignore_uncached=True):
 
 
 def google_specialize_browser(br):
-    br.set_simple_cookie('CONSENT', 'YES+', '.google.com', path='/')
+    if not hasattr(br, 'google_consent_cookie_added'):
+        br.set_simple_cookie('CONSENT', 'YES+', '.google.com', path='/')
+        br.google_consent_cookie_added = True
     return br
 
 
