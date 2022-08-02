@@ -9,8 +9,8 @@ import hashlib
 import os
 import sys
 from contextlib import suppress
-from itertools import repeat
 from threading import Lock
+from itertools import count
 
 from calibre.db import FTSQueryError
 from calibre.db.annotations import unicode_normalize
@@ -31,6 +31,7 @@ class FTS:
         self.dbref = dbref
         self.pool = Pool(dbref)
         self.init_lock = Lock()
+        self.temp_table_counter = count()
 
     def initialize(self, conn):
         needs_dirty = False
@@ -169,14 +170,18 @@ class FTS:
         query += f' JOIN {fts_table} ON fts_db.books_text.id = {fts_table}.rowid'
         query += ' WHERE '
         data = []
+        conn = self.get_connection()
+        temp_table_name = ''
         if restrict_to_book_ids:
-            pl = ','.join(repeat('?', len(restrict_to_book_ids)))
-            query += f' fts_db.books_text.book IN ({pl}) AND '
-            data.extend(restrict_to_book_ids)
+            temp_table_name = f'fts_restrict_search_{next(self.temp_table_counter)}'
+            conn.execute(f'CREATE TABLE temp.{temp_table_name}(x INTEGER)')
+            conn.executemany(f'INSERT INTO temp.{temp_table_name} VALUES (?)', tuple((x,) for x in restrict_to_book_ids))
+            query += f' fts_db.books_text.book IN temp.{temp_table_name} AND '
         query += f' "{fts_table}" MATCH ?'
         data.append(fts_engine_query)
         query += f' ORDER BY {fts_table}.rank '
-        conn = self.get_connection()
+        if temp_table_name:
+            query += f'; DROP TABLE temp.{temp_table_name}'
         try:
             for record in conn.execute(query, tuple(data)):
                 ret = yield {
