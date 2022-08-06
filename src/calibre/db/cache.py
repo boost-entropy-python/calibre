@@ -520,7 +520,9 @@ class Cache:
                     h.update(chunk)
                     pt.write(chunk)
             with self.write_lock:
-                self.backend.queue_fts_job(book_id, fmt, pt.name, sz, h.hexdigest())
+                queued = self.backend.queue_fts_job(book_id, fmt, pt.name, sz, h.hexdigest())
+                if not queued:  # means a dirtied book was removed
+                    self._update_fts_indexing_numbers()
                 return self.backend.fts_has_idle_workers
 
         def loop_while_more_available():
@@ -2461,13 +2463,17 @@ class Cache:
             self.shutting_down = True
             self.event_dispatcher.close()
             self._shutdown_fts()
-            from calibre.customize.ui import available_library_closed_plugins
-            for plugin in available_library_closed_plugins():
-                try:
-                    plugin.run(self)
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
+            try:
+                from calibre.customize.ui import available_library_closed_plugins
+            except ImportError:
+                pass  # happens during interpreter shutdown
+            else:
+                for plugin in available_library_closed_plugins():
+                    try:
+                        plugin.run(self)
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
         self._shutdown_fts(stage=2)
         with self.write_lock:
             self.backend.close()
