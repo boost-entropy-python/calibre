@@ -4,13 +4,13 @@
 
 import json
 import re
-from xml.sax.saxutils import escape, quoteattr
+import sys
 from pprint import pprint
+from xml.sax.saxutils import escape, quoteattr
 
 from calibre.utils.iso8601 import parse_iso8601
 
-
-module_version = 2  # needed for live updates
+module_version = 4  # needed for live updates
 pprint
 
 
@@ -93,9 +93,9 @@ def process_image_block(lines, block):
     if 'web.archive.org' in img:
         img = img.partition('/')[-1]
         img = img[img.find('https://'):]
-    lines.append('<div style="text-align: center"><img src={}/>'.format(quoteattr(img)))
+    lines.append('<div style="text-align: center"><div style="text-align: center"><img src={}/></div><div style="font-size: smaller">'.format(quoteattr(img)))
     lines.extend(caption_lines)
-    lines.append('</div>')
+    lines.append('</div></div>')
 
 
 def json_to_html(raw):
@@ -186,23 +186,26 @@ def extract_html(soup):
     return json_to_html(raw)
 
 
-def download_url(url, br):
-    # NYT has implemented captcha protection for its article pages, so get
-    # them from the wayback machine instead. However, wayback machine is
-    # flaky so god knows how well it will work under load
-    from calibre.ebooks.metadata.sources.update import search_engines_module
-    m = search_engines_module()
-    cu = m.wayback_machine_cached_url(url, br)
-    raw = m.get_data_for_cached_url(cu)
-    if raw is None:
-        raw = br.open_novisit(cu).read()
-    if not isinstance(raw, bytes):
-        raw = raw.encode('utf-8')
-    return raw
+def download_url(url=None, br=None):
+    # Get the URL from the Wayback machine
+    from mechanize import Request
+    host = 'http://localhost:8090'
+    host = 'https://wayback1.calibre-ebook.com'
+    if url is None:
+        url = sys.argv[-1]
+    rq = Request(
+        host + '/nytimes',
+        data=json.dumps({"url": url}),
+        headers={'User-Agent': 'calibre', 'Content-Type': 'application/json'}
+    )
+    if br is None:
+        from calibre import browser
+        br = browser()
+    br.set_handle_gzip(True)
+    return br.open_novisit(rq, timeout=3 * 60).read()
 
 
 if __name__ == '__main__':
-    import sys
     f = sys.argv[-1]
     raw = open(f).read()
     if f.endswith('.html'):
