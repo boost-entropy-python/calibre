@@ -12,7 +12,8 @@ from collections import OrderedDict
 from qt.core import (
     QTableView, Qt, QAbstractItemView, QMenu, pyqtSignal, QFont, QModelIndex,
     QIcon, QItemSelection, QMimeData, QDrag, QStyle, QPoint, QUrl, QHeaderView, QEvent,
-    QStyleOptionHeader, QItemSelectionModel, QSize, QFontMetrics, QApplication)
+    QStyleOptionHeader, QItemSelectionModel, QSize, QFontMetrics, QApplication,
+    QDialog, QGridLayout, QPushButton, QDialogButtonBox, QLabel, QSpinBox)
 
 from calibre.constants import islinux
 from calibre.gui2.dialogs.enum_values_edit import EnumValuesEdit
@@ -33,11 +34,15 @@ from calibre.utils.icu import primary_sort_key
 from polyglot.builtins import iteritems
 
 
-def restrict_column_width(self, col, old_size, new_size):
+def max_permitted_column_width(self, col):
     # arbitrary: scroll bar + header + some
     sw = self.verticalScrollBar().width() if self.verticalScrollBar().isVisible() else 0
     hw = self.verticalHeader().width() if self.verticalHeader().isVisible() else 0
-    max_width = max(200, self.width() - (sw + hw + 10))
+    return max(200, self.width() - (sw + hw + 10))
+
+
+def restrict_column_width(self, col, old_size, new_size):
+    max_width = max_permitted_column_width(self, col)
     if new_size > max_width:
         self.column_header.blockSignals(True)
         self.setColumnWidth(col, max_width)
@@ -200,6 +205,94 @@ class PreserveViewState:  # {{{
             setattr(self, k, v)
         self.__exit__()
 
+# }}}
+
+
+class AdjustColumnSize(QDialog):  # {{{
+
+    def __init__(self, view, column, name):
+        QDialog.__init__(self)
+        self.setWindowTitle(_('Adjust width of {0}').format(name))
+        self.view = view
+        self.column = column
+        l = QGridLayout(self)
+
+        def add_row(a, b=None):
+            r = l.rowCount()
+            if b is None:
+                l.addWidget(a, r, 0, 1, 2)
+            else:
+                if isinstance(a, str):
+                    a = QLabel(a)
+                l.addWidget(a, r, 0, 1, 1)
+                l.addWidget(b, r, 1, 1, 1)
+                if isinstance(a, QLabel):
+                    a.setBuddy(b)
+        l.addRow = add_row
+
+        original_size = self.original_size = view.horizontalHeader().sectionSize(column)
+        l.addRow(_('Original size:'), QLabel(_('{0} pixels').format(str(original_size))))
+
+        self.minimum_size = self.view.horizontalHeader().minimumSectionSize()
+        l.addRow(_('Minimum size:'), QLabel(_('{0} pixels').format(str(self.minimum_size))))
+
+        self.maximum_size = max_permitted_column_width(self.view, self.column)
+        l.addRow(_('Maximum size:'), QLabel(_('{0} pixels').format(str(self.maximum_size))))
+
+        la = QLabel(_('You can also adjust column widths by dragging the divider between column headers'))
+        la.setWordWrap(True)
+        l.addRow(la)
+
+        self.shrink_button = QPushButton(_('&Shrink 10%'))
+        b = self.expand_button = QPushButton(_('&Expand 10%'))
+        l.addRow(self.shrink_button, b)
+
+        b = self.set_minimum_button = QPushButton(_('Set to mi&nimum'))
+        b = self.set_maximum_button = QPushButton(_('Set to ma&ximum'))
+        l.addRow(self.set_minimum_button, b)
+
+        sb = self.spin_box = QSpinBox()
+        sb.setMinimum(self.view.horizontalHeader().minimumSectionSize())
+        sb.setMaximum(self.maximum_size)
+        sb.setValue(original_size)
+        sb.setSuffix(' ' + _('pixels'))
+        l.addRow(_('Set &to:'), sb)
+
+        bb = self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                                QDialogButtonBox.StandardButton.Cancel)
+        l.addRow(bb)
+
+        self.shrink_button.clicked.connect(self.shrink_button_clicked)
+        self.expand_button.clicked.connect(self.expand_button_clicked)
+        self.spin_box.valueChanged.connect(self.spin_box_changed)
+        self.set_minimum_button.clicked.connect(self.set_minimum_button_clicked)
+        self.set_maximum_button.clicked.connect(self.set_maximum_button_clicked)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+
+    def reject(self):
+        self.view.setColumnWidth(self.column, self.original_size)
+        QDialog.reject(self)
+
+    def set_maximum_button_clicked(self):
+        # Do this dance in case the current width exceeds the maximum, which can
+        # happen if the user is playing across multiple monitors
+        self.spin_box.setValue(self.maximum_size-1)
+        self.spin_box.setValue(self.maximum_size)
+
+    def set_minimum_button_clicked(self):
+        self.spin_box.setValue(self.minimum_size)
+
+    def shrink_button_clicked(self):
+        w = int(self.view.horizontalHeader().sectionSize(self.column) * 0.9)
+        self.spin_box.setValue(w)
+
+    def expand_button_clicked(self):
+        w = int(self.view.horizontalHeader().sectionSize(self.column) * 1.1)
+        self.spin_box.setValue(w)
+
+    def spin_box_changed(self, val):
+        self.view.setColumnWidth(self.column, val)
 # }}}
 
 
@@ -508,6 +601,8 @@ class BooksView(QTableView):  # {{{
                 partial(self.resize_column_to_fit, view, col))
         ans.addAction(_('Resize column to fit contents'),
                 partial(self.fit_column_to_contents, view, col))
+        ans.addAction(_('Adjust width of column'),
+                partial(self.manually_adjust_column_size, view, col, name))
         ans.addAction(_('Restore default layout'), partial(handler, action='defaults'))
         if self.can_add_columns:
             ans.addAction(
@@ -939,6 +1034,10 @@ class BooksView(QTableView):  # {{{
     def fit_column_to_contents(self, view, column):
         col = self.column_map.index(column)
         view.resizeColumnToContents(col)
+
+    def manually_adjust_column_size(self, view, column, name):
+        col = self.column_map.index(column)
+        AdjustColumnSize(view, col, name).exec_()
 
     def column_resized(self, col, old_size, new_size):
         restrict_column_width(self, col, old_size, new_size)
