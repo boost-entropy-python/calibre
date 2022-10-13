@@ -18,7 +18,8 @@ from calibre import sanitize_file_name
 from calibre.constants import config_dir
 from calibre.ebooks.metadata.book.base import Metadata
 from calibre.ebooks.metadata.book.formatter import SafeFormat
-from calibre.gui2 import gprefs, error_dialog, choose_files, choose_save_file, pixmap_to_data
+from calibre.gui2 import (gprefs, error_dialog, choose_files, choose_save_file,
+                          pixmap_to_data, question_dialog)
 from calibre.gui2.dialogs.template_dialog_ui import Ui_TemplateDialog
 from calibre.library.coloring import (displayable_columns, color_row_key)
 from calibre.utils.config_base import tweaks
@@ -84,45 +85,30 @@ class TemplateHighlighter(QSyntaxHighlighter):
             r.append((re.compile(a), b))
 
         if not for_python:
-            a(
-                r"\b[a-zA-Z]\w*\b(?!\(|\s+\()"
-                r"|\$+#?[a-zA-Z]\w*",
-                "identifier")
-
+            a(r"\b[a-zA-Z]\w*\b(?!\(|\s+\()"
+              r"|\$+#?[a-zA-Z]\w*",
+              "identifier")
             a(r"^program:", "keymode")
-            a(
-                "|".join([r"\b%s\b" % keyword for keyword in self.KEYWORDS_GPM]),
-                "keyword")
-
-            a(
-                "|".join([r"\b%s\b" % builtin for builtin in
+            a("|".join([r"\b%s\b" % keyword for keyword in self.KEYWORDS_GPM]), "keyword")
+            a("|".join([r"\b%s\b" % builtin for builtin in
                             (builtin_functions if builtin_functions else
                                                 formatter_functions().get_builtins())]),
                 "builtin")
-
             a(r"""(?<!:)'[^']*'|"[^"]*\"""", "string")
         else:
             a(r"^python:", "keymode")
-
-            a(
-                "|".join([r"\b%s\b" % keyword for keyword in self.KEYWORDS_PYTHON]),
-                "keyword")
-            a(
-                "|".join([r"\b%s\b" % builtin for builtin in self.BUILTINS_PYTHON]),
-                "builtin")
-            a(
-                "|".join([r"\b%s\b" % constant for constant in self.CONSTANTS_PYTHON]),
-                "constant")
-
+            a("|".join([r"\b%s\b" % keyword for keyword in self.KEYWORDS_PYTHON]), "keyword")
+            a("|".join([r"\b%s\b" % builtin for builtin in self.BUILTINS_PYTHON]), "builtin")
+            a("|".join([r"\b%s\b" % constant for constant in self.CONSTANTS_PYTHON]), "constant")
             a(r"\bPyQt6\b|\bqt.core\b|\bQt?[A-Z][a-z]\w+\b", "pyqt")
             a(r"@\w+(\.\w+)?\b", "decorator")
-
             a(r"""('|").*?\1""", "string")
             stringRe = r"""((?:"|'){3}).*?\1"""
             a(stringRe, "string")
             self.stringRe = re.compile(stringRe)
             self.tripleSingleRe = re.compile(r"""'''(?!")""")
             self.tripleDoubleRe = re.compile(r'''"""(?!')''')
+            a(r'#[^\n]*', "comment")
         a(
             r"\b[+-]?[0-9]+[lL]?\b"
             r"|\b[+-]?0[xX][0-9A-Fa-f]+[lL]?\b"
@@ -197,17 +183,6 @@ class TemplateHighlighter(QSyntaxHighlighter):
         elif text[0] == "#":
             self.setFormat(0, textLength, self.Formats["comment"])
             return
-        elif self.for_python:
-            stack = []
-            for i, c in enumerate(text):
-                if c in ('"', "'"):
-                    if stack and stack[-1] == c:
-                        stack.pop()
-                    else:
-                        stack.append(c)
-                elif c == "#" and len(stack) == 0:
-                    self.setFormat(i, len(text), self.Formats["comment"])
-                    return
 
         for regex, format_ in self.Rules:
             for m in regex.finditer(text):
@@ -430,6 +405,8 @@ class TemplateDialog(QDialog, Ui_TemplateDialog):
                 self.textbox.setPlainText(text)
         else:
             text = ''
+        self.original_text = text
+
         self.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText(_('&OK'))
         self.buttonBox.button(QDialogButtonBox.StandardButton.Cancel).setText(_('&Cancel'))
 
@@ -580,7 +557,7 @@ class TemplateDialog(QDialog, Ui_TemplateDialog):
             ca.setIcon(QIcon.ic('ok.png'))
         ca.triggered.connect(partial(self.set_word_wrap, not word_wrapping))
         m.addSeparator()
-        ca = m.addAction(_('Add python template definition text'))
+        ca = m.addAction(_('Add Python template definition text'))
         ca.triggered.connect(self.add_python_template_header_text)
         m.addSeparator()
         ca = m.addAction(_('Load template from the Template tester'))
@@ -827,7 +804,7 @@ def evaluate(book, context):
             return (_('User defined Python template function') if longform else
                             _('User function'))
         elif self.all_functions[name].object_type is StoredObjectType.StoredPythonTemplate:
-            return (_('Stored user defined python template') if longform else _('Stored template'))
+            return (_('Stored user defined Python template') if longform else _('Stored template'))
         return (_('Stored user defined GPM template') if longform else _('Stored template'))
 
     def function_changed(self, toWhat):
@@ -851,6 +828,16 @@ def evaluate(book, context):
     def save_geometry(self):
         gprefs['template_editor_table_widths'] = self.table_column_widths
         gprefs['template_editor_dialog_geometry'] = bytearray(self.saveGeometry())
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key.Key_Escape:
+            # Check about ESC to avoid killing the dialog by mistake
+            if self.textbox.toPlainText() != self.original_text:
+                r = question_dialog(self, _('Discard changes?'),
+                      _('Do you really want to close this dialog, discarding any changes?'))
+                if not r:
+                    return
+        QDialog.keyPressEvent(self, ev)
 
     def accept(self):
         txt = str(self.textbox.toPlainText()).rstrip()
