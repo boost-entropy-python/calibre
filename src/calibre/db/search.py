@@ -5,18 +5,22 @@ __license__   = 'GPL v3'
 __copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import regex, weakref, operator
-from functools import partial
+import operator
+import regex
+import weakref
+from collections import OrderedDict, deque
 from datetime import timedelta
-from collections import deque, OrderedDict
+from functools import partial
 
-from calibre.constants import preferred_encoding, DEBUG
+from calibre.constants import DEBUG, preferred_encoding
 from calibre.db.utils import force_to_bool
 from calibre.utils.config_base import prefs
-from calibre.utils.date import parse_date, UNDEFINED_DATE, now, dt_as_local
-from calibre.utils.icu import primary_no_punc_contains, primary_contains, sort_key
-from calibre.utils.localization import lang_map, canonicalize_lang
-from calibre.utils.search_query_parser import SearchQueryParser, ParseException
+from calibre.utils.date import UNDEFINED_DATE, dt_as_local, now, parse_date
+from calibre.utils.icu import (
+    lower as icu_lower, primary_contains, primary_no_punc_contains, sort_key,
+)
+from calibre.utils.localization import canonicalize_lang, lang_map
+from calibre.utils.search_query_parser import ParseException, SearchQueryParser
 from polyglot.builtins import iteritems, string_or_bytes
 
 CONTAINS_MATCH = 0
@@ -237,9 +241,12 @@ class NumericSearch:  # {{{
         dt = datatype
 
         if is_many and query in {'true', 'false'}:
-            valcheck = lambda x: True
             if datatype == 'rating':
-                valcheck = lambda x: x is not None and x > 0
+                def valcheck(x):
+                    return (x is not None and x > 0)
+            else:
+                def valcheck(x):
+                    return True
             found = set()
             for val, book_ids in field_iter():
                 if valcheck(val):
@@ -248,14 +255,18 @@ class NumericSearch:  # {{{
 
         if query == 'false':
             if location == 'cover':
-                relop = lambda x,y: not bool(x)
+                def relop(x, y):
+                    return (not bool(x))
             else:
-                relop = lambda x,y: x is None
+                def relop(x, y):
+                    return (x is None)
         elif query == 'true':
             if location == 'cover':
-                relop = lambda x,y: bool(x)
+                def relop(x, y):
+                    return bool(x)
             else:
-                relop = lambda x,y: x is not None
+                def relop(x, y):
+                    return (x is not None)
         else:
             for k, relop in iteritems(self.operators):
                 if query.startswith(k):
@@ -265,8 +276,11 @@ class NumericSearch:  # {{{
                 relop = self.operators['=']
 
             if dt == 'rating':
-                cast = lambda x: 0 if x is None else int(x)
-                adjust = lambda x: x // 2
+                def cast(x):
+                    return (0 if x is None else int(x))
+
+                def adjust(x):
+                    return (x // 2)
             else:
                 # Datatype is empty if the source is a template. Assume float
                 cast = float if dt in ('float', 'composite', 'half-rating', '') else int

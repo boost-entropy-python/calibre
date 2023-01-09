@@ -15,8 +15,8 @@ from calibre.constants import iswindows
 from calibre.ebooks import BOOK_EXTENSIONS
 from calibre.ebooks.metadata import MetaInformation, normalize_isbn
 from calibre.gui2 import (
-    choose_dir, choose_files, choose_files_and_remember_all_files, error_dialog,
-    gprefs, info_dialog, question_dialog, warning_dialog
+    choose_dir, choose_files, choose_files_and_remember_all_files, error_dialog, gprefs,
+    info_dialog, question_dialog, warning_dialog,
 )
 from calibre.gui2.actions import InterfaceAction
 from calibre.gui2.dialogs.add_empty_book import AddEmptyBookDialog
@@ -26,6 +26,7 @@ from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils.config_base import tweaks
 from calibre.utils.filenames import ascii_filename, make_long_path_useable
 from calibre.utils.icu import sort_key
+from calibre.utils.localization import ngettext
 from polyglot.builtins import iteritems, string_or_bytes
 
 
@@ -127,7 +128,7 @@ class AddAction(InterfaceAction):
                     _('Are you sure you want to set the same'
                     ' cover for all %d books?')%len(ids)):
                 return
-            with lopen(images[0], 'rb') as f:
+            with open(images[0], 'rb') as f:
                 cdata = f.read()
             self.gui.current_db.new_api.set_cover({book_id: cdata for book_id in ids})
             self.gui.refresh_cover_browser()
