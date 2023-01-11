@@ -185,6 +185,14 @@
         "cflags": "/X"
     },
     {
+        "name": "winspeech",
+        "only": "windows",
+        "headers": "calibre/utils/cpp_binding.h calibre/utils/windows/common.h",
+        "sources": "calibre/utils/windows/winspeech.cpp",
+        "libraries": "WindowsApp",
+        "cflags": "/X /std:c++17 /ZW /bigobj /await /permissive- /WX /Zc:twoPhase-"
+    },
+    {
         "name": "wpd",
         "only": "windows",
         "sources": "calibre/devices/mtp/windows/device_enumeration.cpp calibre/devices/mtp/windows/content_enumeration.cpp calibre/devices/mtp/windows/device.cpp calibre/devices/mtp/windows/wpd.cpp",
