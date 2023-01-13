@@ -7,32 +7,33 @@
 #include "common.h"
 
 #include <array>
-#include <collection.h>
+#include <deque>
+#include <memory>
 #include <winrt/base.h>
-#include <ppltasks.h>
 #include <winrt/Windows.Foundation.Collections.h>
-#include <windows.foundation.h>
-#include <windows.media.speechsynthesis.h>
-#include <windows.storage.streams.h>
+#include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.Media.SpeechSynthesis.h>
 
-using namespace Windows::Foundation;
-using namespace Windows::Foundation::Collections;
-using namespace Windows::Media::SpeechSynthesis;
-using namespace Windows::Storage::Streams;
-using namespace Platform;
-using namespace Concurrency;
+using namespace winrt::Windows::Foundation;
+using namespace winrt::Windows::Foundation::Collections;
+using namespace winrt::Windows::Media::SpeechSynthesis;
+using namespace winrt::Windows::Storage::Streams;
 
-// static void
-// wait_for_async( Windows::Foundation::IAsyncInfo ^op ) {
-//     while(op->Status == Windows::Foundation::AsyncStatus::Started) {
-//         CoreWindow::GetForCurrentThread()->Dispatcher->ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
-//     }
-// }
+static PyObject*
+runtime_error_as_python_error(PyObject *exc_type, winrt::hresult_error const &ex, const char *file, const int line, const char *prefix="", PyObject *name=NULL) {
+    pyobject_raii msg(PyUnicode_FromWideChar(ex.message().c_str(), -1));
+    const HRESULT hr = ex.to_abi();
+    if (name) PyErr_Format(exc_type, "%s:%d:%s:[hr=0x%x] %V: %S", file, line, prefix, hr, msg.ptr(), "Out of memory", name);
+    else PyErr_Format(exc_type, "%s:%d:%s:[hr=0x%x] %V", file, line, prefix, hr, msg.ptr(), "Out of memory");
+    return NULL;
+}
+#define set_python_error_from_runtime(ex, ...) runtime_error_as_python_error(PyExc_OSError, ex, __FILE__, __LINE__, __VA_ARGS__)
 
-typedef struct {
+
+struct Synthesizer {
     PyObject_HEAD
-    SpeechSynthesizer ^synth;
-} Synthesizer;
+    SpeechSynthesizer synth{nullptr};
+};
 
 
 static PyTypeObject SynthesizerType = {
@@ -43,7 +44,7 @@ static PyObject *
 Synthesizer_new(PyTypeObject *type, PyObject *args, PyObject *kwds) { INITIALIZE_COM_IN_FUNCTION
 	Synthesizer *self = (Synthesizer *) type->tp_alloc(type, 0);
     if (self) {
-        self->synth = ref new SpeechSynthesizer();
+        self->synth = SpeechSynthesizer();
     }
     if (self && !PyErr_Occurred()) com.detach();
     return (PyObject*)self;
@@ -51,11 +52,9 @@ Synthesizer_new(PyTypeObject *type, PyObject *args, PyObject *kwds) { INITIALIZE
 
 static void
 Synthesizer_dealloc(Synthesizer *self) {
-    self->synth = nullptr;
+    self->synth = SpeechSynthesizer{nullptr};
     CoUninitialize();
 }
-
-#define WM_DONE (WM_USER + 0)
 
 static void
 ensure_current_thread_has_message_queue(void) {
@@ -63,103 +62,96 @@ ensure_current_thread_has_message_queue(void) {
     PeekMessage(&msg, NULL, WM_USER, WM_USER, PM_NOREMOVE);
 }
 
-static bool
-send_done_message_to_thread(DWORD thread_id) {
-    return PostThreadMessageA(thread_id, WM_DONE, 0, 0);
-}
-
-static bool
-pump_till_done(void) {
-    MSG msg;
-    while (true) {
-        BOOL ret = GetMessage(&msg, NULL, 0, 0);
-        if (ret == 0) { PyErr_SetString(PyExc_OSError, "WM_QUIT received"); return false; } // WM_QUIT
-        if (ret == -1) { PyErr_SetFromWindowsErr(0); return false; }
-		if (msg.message == WM_DONE) {
-            break;
-        }
-		DispatchMessage(&msg);
-    }
-    return true;
-}
-
 static PyObject*
 Synthesizer_create_recording(Synthesizer *self, PyObject *args) {
     wchar_raii pytext;
-	if (!PyArg_ParseTuple(args, "O&", py_to_wchar_no_none, &pytext)) return NULL;
-    StringReference text(pytext.ptr());
-    bool error_ocurred = false;
-    HRESULT hr = S_OK;
-    std::array<wchar_t, 2048> error_msg;
-    DataReader ^reader = nullptr;
-    DWORD main_thread_id = GetCurrentThreadId();
-    unsigned long long stream_size;
-    unsigned int bytes_read;
+    PyObject *callback;
+    int is_ssml = 0;
+	if (!PyArg_ParseTuple(args, "O&O|p", py_to_wchar_no_none, &pytext, &callback, &is_ssml)) return NULL;
+    if (!PyCallable_Check(callback)) { PyErr_SetString(PyExc_TypeError, "callback must be callable"); return NULL; }
 
-    create_task(self->synth->SynthesizeTextToStreamAsync(text.GetString()), task_continuation_context::use_current()
-    ).then([&reader, &stream_size](task<SpeechSynthesisStream^> stream_task) {
-        SpeechSynthesisStream^ stream = stream_task.get();
-        stream_size = stream->Size;
-        reader = ref new DataReader(stream);
-        return reader->LoadAsync((unsigned int)stream_size);
-    }).then([main_thread_id, &bytes_read, &error_msg, &error_ocurred, &reader](task<unsigned int> bytes_read_task) {
-        try {
-            bytes_read = bytes_read_task.get();
-        } catch (Exception ^ex) {
-            std::swprintf(error_msg.data(), error_msg.size(), L"Could not synthesize speech from text: %ls", ex->Message->Data());
-            error_ocurred = true;
-        }
-        send_done_message_to_thread(main_thread_id);
-    });
-
-    if (!pump_till_done()) return NULL;
-
-    if (error_ocurred) {
-        pyobject_raii err(PyUnicode_FromWideChar(error_msg.data(), -1));
-        PyErr_Format(PyExc_OSError, "%V", err.ptr(), "Could not create error message unicode object");
-        return NULL;
+    ensure_current_thread_has_message_queue();
+    SpeechSynthesisStream stream{nullptr};
+    try {
+        if (is_ssml) stream = self->synth.SynthesizeSsmlToStreamAsync(pytext.as_view()).get();
+        else stream = self->synth.SynthesizeTextToStreamAsync(pytext.as_view()).get();
+    } catch(winrt::hresult_error const& ex) {
+        return set_python_error_from_runtime(ex, "Failed to get SpeechSynthesisStream from text");
     }
-    auto data = ref new Platform::Array<byte>(bytes_read);
-    reader->ReadBytes(data);
-    return PyBytes_FromStringAndSize((const char*)data->Data, bytes_read);
+    unsigned long long stream_size = stream.Size(), bytes_read = 0;
+    DataReader reader(stream);
+    unsigned int n;
+    const static unsigned int chunk_size = 16 * 1024;
+    while (bytes_read < stream_size) {
+        try {
+            n = reader.LoadAsync(chunk_size).get();
+        } catch(winrt::hresult_error const& ex) {
+            return set_python_error_from_runtime(ex, "Failed to load data from DataReader");
+        }
+        if (n > 0) {
+            bytes_read += n;
+            pyobject_raii b(PyBytes_FromStringAndSize(NULL, n));
+            if (!b) return NULL;
+            unsigned char *p = reinterpret_cast<unsigned char*>(PyBytes_AS_STRING(b.ptr()));
+            reader.ReadBytes(winrt::array_view(p, p + n));
+            pyobject_raii ret(PyObject_CallFunctionObjArgs(callback, b.ptr(), NULL));
+        }
+    }
+
+    if (PyErr_Occurred()) return NULL;
+    Py_RETURN_NONE;
 }
+
 
 static PyObject*
-voice_as_dict(VoiceInformation ^voice) {
-    const char *gender = "";
-    switch (voice->Gender) {
-        case VoiceGender::Male: gender = "male"; break;
-        case VoiceGender::Female: gender = "female"; break;
+voice_as_dict(VoiceInformation const& voice) {
+    try {
+        const char *gender = "";
+        switch (voice.Gender()) {
+            case VoiceGender::Male: gender = "male"; break;
+            case VoiceGender::Female: gender = "female"; break;
+        }
+        return Py_BuildValue("{su su su su ss}",
+            "display_name", voice.DisplayName().c_str(),
+            "description", voice.Description().c_str(),
+            "id", voice.Id().c_str(),
+            "language", voice.Language().c_str(),
+            "gender", gender
+        );
+    } catch(winrt::hresult_error const& ex) {
+        return set_python_error_from_runtime(ex);
     }
-    return Py_BuildValue("{su su su su ss}",
-        "display_name", voice->DisplayName? voice->DisplayName->Data() : NULL,
-        "description", voice->Description ? voice->Description->Data() : NULL,
-        "id", voice->Id ? voice->Id->Data(): NULL,
-        "language", voice->Language ? voice->Language->Data() : NULL,
-        "gender", gender
-    );
 }
+
 
 static PyObject*
 all_voices(PyObject* /*self*/, PyObject* /*args*/) { INITIALIZE_COM_IN_FUNCTION
-    IVectorView<VoiceInformation^>^ voices = SpeechSynthesizer::AllVoices;
-    pyobject_raii ans(PyTuple_New(voices->Size));
-    if (!ans) return NULL;
-    Py_ssize_t i = 0;
-    for(auto voice : voices) {
-        PyObject *v = voice_as_dict(voice);
-        if (v) {
-            PyTuple_SET_ITEM(ans.ptr(), i++, v);
-        } else {
-            return NULL;
+    try {
+        auto voices = SpeechSynthesizer::AllVoices();
+        pyobject_raii ans(PyTuple_New(voices.Size()));
+        if (!ans) return NULL;
+        Py_ssize_t i = 0;
+        for(auto const& voice : voices) {
+            PyObject *v = voice_as_dict(voice);
+            if (v) {
+                PyTuple_SET_ITEM(ans.ptr(), i++, v);
+            } else {
+                return NULL;
+            }
         }
+        return ans.detach();
+    } catch(winrt::hresult_error const& ex) {
+        return set_python_error_from_runtime(ex);
     }
-    return ans.detach();
 }
 
 static PyObject*
 default_voice(PyObject* /*self*/, PyObject* /*args*/) { INITIALIZE_COM_IN_FUNCTION
-    return voice_as_dict(SpeechSynthesizer::DefaultVoice);
+    try {
+        return voice_as_dict(SpeechSynthesizer::DefaultVoice());
+    } catch(winrt::hresult_error const& ex) {
+        return set_python_error_from_runtime(ex);
+    }
 }
 
 #define M(name, args) { #name, (PyCFunction)Synthesizer_##name, args, ""}
