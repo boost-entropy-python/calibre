@@ -10,12 +10,12 @@ from collections import OrderedDict, defaultdict
 from functools import partial
 from itertools import chain
 from qt.core import (
-    QT_VERSION_STR, QAbstractItemView, QAbstractTableModel, QApplication, QCheckBox,
-    QComboBox, QDialog, QDialogButtonBox, QFont, QFormLayout, QGridLayout, QHBoxLayout,
-    QIcon, QInputDialog, QKeySequence, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMenu, QModelIndex, QPlainTextEdit, QPushButton, QSize, QStackedLayout, Qt,
-    QTableView, QTimer, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
-    pyqtSignal,
+    QT_VERSION_STR, QAbstractItemView, QAbstractTableModel, QAction, QApplication,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFont, QFormLayout, QGridLayout,
+    QHBoxLayout, QIcon, QInputDialog, QKeySequence, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMenu, QModelIndex, QPlainTextEdit, QPushButton, QSize,
+    QStackedLayout, Qt, QTableView, QTimer, QToolButton, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget, pyqtSignal,
 )
 from threading import Thread
 
@@ -856,6 +856,17 @@ class WordsView(QTableView):
         self.setTabKeyNavigation(False)
         self.verticalHeader().close()
 
+    def change_current_word_by(self, delta=1):
+        row = self.currentIndex().row()
+        row = (row + delta + self.model().rowCount()) % self.model().rowCount()
+        self.highlight_row(row)
+
+    def next_word(self):
+        self.change_current_word_by(1)
+
+    def previous_word(self):
+        self.change_current_word_by(-1)
+
     def keyPressEvent(self, ev):
         if ev == QKeySequence.StandardKey.Copy:
             self.copy_to_clipboard()
@@ -948,6 +959,17 @@ class ManageExcludedFiles(Dialog):
     @property
     def excluded_files(self):
         return {item.text() for item in self.files.selectedItems()}
+
+
+class SuggestedList(QListWidget):
+
+    def next_word(self):
+        row = (self.currentRow() + 1) % self.count()
+        self.setCurrentRow(row)
+
+    def previous_word(self):
+        row = (self.currentRow() - 1 + self.count()) % self.count()
+        self.setCurrentRow(row)
 
 
 class SpellCheck(Dialog):
@@ -1078,7 +1100,7 @@ class SpellCheck(Dialog):
         sw.setPlaceholderText(_('The replacement word'))
         sw.returnPressed.connect(self.change_word)
         l.addWidget(sw)
-        self.suggested_list = sl = QListWidget(self)
+        self.suggested_list = sl = SuggestedList(self)
         sl.currentItemChanged.connect(self.current_suggestion_changed)
         sl.itemActivated.connect(self.change_word)
         set_no_activate_on_click(sl)
@@ -1099,6 +1121,33 @@ class SpellCheck(Dialog):
         self.hb = h = FlowLayout()
         self.summary = s = QLabel('')
         self.main.l.addLayout(h), h.addWidget(s), h.addWidget(om), h.addWidget(cs), h.addWidget(cs2)
+        self.action_next_word = a = QAction(self)
+        a.setShortcut(QKeySequence(Qt.Key.Key_Down))
+        a.triggered.connect(self.next_word)
+        self.addAction(a)
+        self.action_previous_word = a = QAction(self)
+        a.triggered.connect(self.previous_word)
+        a.setShortcut(QKeySequence(Qt.Key.Key_Up))
+        self.addAction(a)
+
+        def button_action(sc, tt, button):
+            a = QAction(self)
+            self.addAction(a)
+            a.setShortcut(QKeySequence(sc, QKeySequence.SequenceFormat.PortableText))
+            button.setToolTip(tt + f' [{a.shortcut().toString(QKeySequence.SequenceFormat.NativeText)}]')
+            a.triggered.connect(button.click)
+            return a
+
+        self.action_change_word = button_action('ctrl+right', _('Change all occurrences of this word'), self.change_button)
+        self.action_show_next_occurrence = button_action('alt+right', _('Show next occurrence of this word in the book'), self.next_occurrence)
+
+    def next_word(self):
+        v = self.suggested_list if self.focusWidget() is self.suggested_list else self.words_view
+        v.next_word()
+
+    def previous_word(self):
+        v = self.suggested_list if self.focusWidget() is self.suggested_list else self.words_view
+        v.previous_word()
 
     def keyPressEvent(self, ev):
         if ev.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
@@ -1243,6 +1292,8 @@ class SpellCheck(Dialog):
             row = self.words_model.row_for_word(w)
             if row == -1:
                 row = self.words_view.currentIndex().row()
+                if row < self.words_model.rowCount() - 1:
+                    row += 1
             if row > -1:
                 self.words_view.highlight_row(row)
 
