@@ -7,12 +7,17 @@
 #include "common.h"
 
 #include <array>
+#include <vector>
+#include <map>
 #include <deque>
 #include <memory>
+#include <sstream>
 #include <mutex>
+#include <filesystem>
 #include <functional>
 #include <iostream>
 #include <unordered_map>
+#include <io.h>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Storage.Streams.h>
@@ -28,23 +33,194 @@ using namespace winrt::Windows::Media::Core;
 using namespace winrt::Windows::Storage::Streams;
 typedef unsigned long long id_type;
 
-static PyObject*
-runtime_error_as_python_error(PyObject *exc_type, winrt::hresult_error const &ex, const char *file, const int line, const char *prefix="", PyObject *name=NULL) {
-    pyobject_raii msg(PyUnicode_FromWideChar(ex.message().c_str(), -1));
-    const HRESULT hr = ex.to_abi();
-    if (name) PyErr_Format(exc_type, "%s:%d:%s:[hr=0x%x] %V: %S", file, line, prefix, hr, msg.ptr(), "Out of memory", name);
-    else PyErr_Format(exc_type, "%s:%d:%s:[hr=0x%x] %V", file, line, prefix, hr, msg.ptr(), "Out of memory");
-    return NULL;
+static std::mutex output_lock;
+static DWORD main_thread_id;
+enum {
+    STDIN_FAILED = 1,
+    STDIN_MSG,
+    EXIT_REQUESTED
+};
+
+// trim from start (in place)
+static inline void
+ltrim(std::string &s) {
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }));
 }
 
-#define CATCH_ALL_EXCEPTIONS(msg) catch(winrt::hresult_error const& ex) { \
-    runtime_error_as_python_error(PyExc_OSError, ex, __FILE__, __LINE__, msg); \
+// trim from end (in place)
+static inline void
+rtrim(std::string &s) {
+    s.erase(std::find_if(s.rbegin(), s.rend(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }).base(), s.end());
+}
+
+static std::vector<std::string_view>
+split(std::string const &src_, std::string const &delim = " ") {
+    size_t pos;
+    std::vector<std::string_view> ans; ans.reserve(16);
+    std::string_view sv(src_);
+    while ((pos = sv.find(delim)) != std::string_view::npos) {
+        if (pos > 0) ans.emplace_back(sv.substr(0, pos));
+        sv = sv.substr(pos + 1);
+    }
+    if (sv.size() > 0) ans.emplace_back(sv);
+    return ans;
+}
+
+static std::string
+join(std::vector<std::string_view> parts, std::string const &delim = " ") {
+    std::string ans; ans.reserve(1024);
+    for (auto const &x : parts) {
+        ans.append(x);
+        ans.append(delim);
+    }
+    ans.erase(ans.size() - delim.size());
+    return ans;
+}
+
+static id_type
+parse_id(std::string_view const& s) {
+    id_type ans = 0;
+    for (auto ch : s) {
+        auto delta = ch - '0';
+        if (delta < 0 || delta > 9) {
+            throw std::invalid_argument(std::string("Not a valid id: ") + std::string(s));
+        }
+        ans = (ans * 10) + delta;
+    }
+    return ans;
+}
+
+
+static std::string
+serialize_string_for_json(std::string const &src) {
+    std::string ans("\"");
+    ans.reserve(src.size() + 16);
+    for (auto ch : src) {
+        switch(ch) {
+            case '\\':
+                ans += "\\\\"; break;
+            case '"':
+                ans += "\\\""; break;
+            case '\n':
+                ans += "\\n"; break;
+            case '\r':
+                ans += "\\r"; break;
+            default:
+                ans += ch; break;
+        }
+    }
+    ans += '"';
+    return ans;
+}
+
+class json_val {
+private:
+    enum { DT_INT, DT_STRING, DT_LIST, DT_OBJECT, DT_NONE, DT_BOOL } type;
+    std::string s;
+    bool b;
+    long long i;
+    std::vector<json_val> list;
+    std::map<std::string, json_val> object;
+public:
+    json_val() : type(DT_NONE) {}
+    json_val(std::string &&text) : type(DT_STRING), s(text) {}
+    json_val(const char *ns) : type(DT_STRING), s(ns) {}
+    json_val(winrt::hstring const& text) : type(DT_STRING), s(winrt::to_string(text)) {}
+    json_val(std::string_view text) : type(DT_STRING), s(text) {}
+    json_val(long long num) : type(DT_INT), i(num) {}
+    json_val(std::vector<json_val> &&items) : type(DT_LIST), list(items) {}
+    json_val(std::map<std::string, json_val> &&m) : type(DT_OBJECT), object(m) {}
+    json_val(std::initializer_list<std::pair<const std::string, json_val>> vals) : type(DT_OBJECT), object(vals) { }
+    json_val(bool x) : type(DT_BOOL), b(x) {}
+
+    json_val(VoiceInformation const& voice) : type(DT_OBJECT) {
+        const char *gender = "";
+        switch (voice.Gender()) {
+            case VoiceGender::Male: gender = "male"; break;
+            case VoiceGender::Female: gender = "female"; break;
+        }
+        object = {
+            {"display_name", json_val(voice.DisplayName())},
+            {"description", json_val(voice.Description())},
+            {"id", json_val(voice.Id())},
+            {"language", json_val(voice.Language())},
+            {"gender", json_val(gender)},
+        };
+    }
+
+    json_val(IVectorView<VoiceInformation> const& voices) : type(DT_LIST) {
+        list.reserve(voices.Size());
+        for(auto const& voice : voices) {
+            list.emplace_back(json_val(voice));
+        }
+    }
+
+    std::string serialize() const {
+        switch(type) {
+            case DT_NONE:
+                return "nil";
+            case DT_BOOL:
+                return b ? "true" : "false";
+            case DT_INT:
+                // this is not really correct since JS has various limits on numeric types, but good enough for us
+                return std::to_string(i);
+            case DT_STRING:
+                return serialize_string_for_json(s);
+            case DT_LIST: {
+                std::string ans("[");
+                ans.reserve(list.size() * 32);
+                for (auto const &i : list) {
+                    ans += i.serialize();
+                    ans += ", ";
+                }
+                ans.erase(ans.size() - 2); ans += "]";
+                return ans;
+            }
+            case DT_OBJECT: {
+                std::string ans("{");
+                ans.reserve(object.size() * 64);
+                for (const auto& [key, value]: object) {
+                    ans += serialize_string_for_json(key);
+                    ans += ": ";
+                    ans += value.serialize();
+                    ans += ", ";
+                }
+                ans.erase(ans.size() - 2); ans += "}";
+                return ans;
+            }
+        }
+        return "";
+    }
+};
+
+static void
+output(id_type cmd_id, std::string_view const &msg_type, json_val const &&msg) {
+    std::scoped_lock lock(output_lock);
+    std::cout << cmd_id << " " << msg_type << " " << msg.serialize() << std::endl;
+}
+
+static void
+output_error(id_type cmd_id, std::string_view const &msg, std::string_view const &error, long long line, HRESULT hr=S_OK) {
+    std::map<std::string, json_val> m = {{"msg", json_val(msg)}, {"error", json_val(error)}, {"file", json_val("winspeech.cpp")}, {"line", json_val(line)}};
+    if (hr != S_OK) m["hr"] = json_val((long long)hr);
+    output(cmd_id, "error", std::move(m));
+}
+
+#define CATCH_ALL_EXCEPTIONS(msg, cmd_id) catch(winrt::hresult_error const& ex) { \
+    output_error(cmd_id, msg, winrt::to_string(ex.message()), __LINE__, ex.to_abi()); \
 } catch (std::exception const &ex) { \
-    PyErr_Format(PyExc_OSError, "%s:%d:%s: %s", __FILE__, __LINE__, msg, ex.what()); \
+    output_error(cmd_id, msg, ex.what(), __LINE__); \
+} catch (std::string const &ex) { \
+    output_error(cmd_id, msg, ex, __LINE__); \
 } catch (...) { \
-    PyErr_Format(PyExc_OSError, "%s:%d:%s: Unknown exception type was raised", __FILE__, __LINE__, msg); \
+    output_error(cmd_id, msg, "Unknown exception type was raised", __LINE__); \
 }
 
+/* Legacy code {{{
 
 template<typename T>
 class WeakRefs {
@@ -347,7 +523,7 @@ voice_as_dict(VoiceInformation const& voice) {
 
 
 static PyObject*
-all_voices(PyObject* /*self*/, PyObject* /*args*/) { INITIALIZE_COM_IN_FUNCTION
+all_voices(PyObject*, PyObject*) { INITIALIZE_COM_IN_FUNCTION
     try {
         auto voices = SpeechSynthesizer::AllVoices();
         pyobject_raii ans(PyTuple_New(voices.Size()));
@@ -367,7 +543,7 @@ all_voices(PyObject* /*self*/, PyObject* /*args*/) { INITIALIZE_COM_IN_FUNCTION
 }
 
 static PyObject*
-default_voice(PyObject* /*self*/, PyObject* /*args*/) { INITIALIZE_COM_IN_FUNCTION
+default_voice(PyObject*, PyObject*) { INITIALIZE_COM_IN_FUNCTION
     try {
         return voice_as_dict(SpeechSynthesizer::DefaultVoice());
     } CATCH_ALL_EXCEPTIONS("Could not get default voice");
@@ -404,34 +580,125 @@ pump_waiting_messages(PyObject*, PyObject*) {
 }
 
 
+}}} */
+
+static std::vector<std::string> stdin_messages;
+static std::mutex stdin_messages_lock;
+
+static void
+post_message(LPARAM type, WPARAM data = 0) {
+    PostThreadMessageA(main_thread_id, WM_USER, data, type);
+}
+
+
+static winrt::fire_and_forget
+run_input_loop(void) {
+    co_await winrt::resume_background();
+    std::string line;
+    while(!std::cin.eof() && std::getline(std::cin, line)) {
+        if (line.size() > 0) {
+            {
+                std::scoped_lock lock(stdin_messages_lock);
+                stdin_messages.push_back(line);
+            }
+            post_message(STDIN_MSG);
+        }
+    }
+    post_message(STDIN_FAILED, std::cin.fail() ? 1 : 0);
+}
+
+static void
+handle_speak(id_type cmd_id, std::vector<std::string_view> &parts) {
+}
+
+static winrt::fire_and_forget
+handle_stdin_messages(void) {
+    co_await winrt::resume_background();
+    std::scoped_lock lock(stdin_messages_lock);
+    std::vector<std::string_view> parts;
+    std::string_view command;
+    id_type cmd_id;
+    for (auto & msg : stdin_messages) {
+        rtrim(msg);
+        bool ok = false;
+        if (msg == "exit") {
+            post_message(EXIT_REQUESTED);
+            break;
+        }
+        try {
+            parts = split(msg);
+            command = parts.at(1); cmd_id = parse_id(parts.at(0));
+            parts.erase(parts.begin(), parts.begin() + 2);
+            ok = true;
+        } CATCH_ALL_EXCEPTIONS((std::string("Invalid input message: ") + msg), 0);
+        if (!ok) continue;
+        try {
+            if (command == "exit") {
+                try {
+                    post_message(EXIT_REQUESTED, parse_id(parts.at(2)));
+                } catch(...) {
+                    post_message(EXIT_REQUESTED);
+                }
+                break;
+            }
+            else if (command == "echo") {
+                output(cmd_id, command, {{"msg", json_val(std::move(join(parts)))}});
+            }
+            else if (command == "default_voice") {
+                output(cmd_id, "default_voice", SpeechSynthesizer::DefaultVoice());
+            }
+            else if (command == "all_voices") {
+                output(cmd_id, "all_voices", SpeechSynthesizer::AllVoices());
+            }
+            else if (command == "speak") {
+                handle_speak(cmd_id, parts);
+            }
+            else throw std::string("Unknown command: ") + std::string(command);
+        } CATCH_ALL_EXCEPTIONS("Error handling input message", cmd_id);
+    }
+    stdin_messages.clear();
+}
+
+static PyObject*
+run_main_loop(PyObject*, PyObject*) {
+    winrt::init_apartment();
+    main_thread_id = GetCurrentThreadId();
+    MSG msg;
+    unsigned long long exit_code = 0;
+    Py_BEGIN_ALLOW_THREADS;
+    PeekMessage(&msg, NULL, WM_USER, WM_USER, PM_NOREMOVE);  // ensure we have a message queue
+
+    if (_isatty(_fileno(stdin))) {
+        std::cout << "Welcome to winspeech. Type exit to quit." << std::endl;
+    }
+    run_input_loop();
+
+    while (true) {
+        BOOL ret = GetMessage(&msg, NULL, 0, 0);
+        if (ret <= 0) { // WM_QUIT or error
+            exit_code = msg.message == WM_QUIT ? msg.wParam : 1;
+            break;
+        }
+        if (msg.message == WM_USER) {
+            if (msg.lParam == STDIN_FAILED || msg.lParam == EXIT_REQUESTED) { exit_code = msg.wParam; break; }
+            else if (msg.lParam == STDIN_MSG) handle_stdin_messages();
+        } else {
+            DispatchMessage(&msg);
+        }
+    }
+    Py_END_ALLOW_THREADS;
+    return PyLong_FromUnsignedLongLong(exit_code);
+}
+
 #define M(name, args) { #name, name, args, ""}
 static PyMethodDef methods[] = {
-    M(all_voices, METH_NOARGS),
-    M(default_voice, METH_NOARGS),
-    M(pump_waiting_messages, METH_NOARGS),
+    M(run_main_loop, METH_NOARGS),
     {NULL, NULL, 0, NULL}
 };
 #undef M
 
-
 static int
 exec_module(PyObject *m) {
-    SynthesizerType.tp_name = "winspeech.Synthesizer";
-    SynthesizerType.tp_doc = "Wrapper for SpeechSynthesizer";
-    SynthesizerType.tp_basicsize = sizeof(Synthesizer);
-    SynthesizerType.tp_itemsize = 0;
-    SynthesizerType.tp_flags = Py_TPFLAGS_DEFAULT;
-    SynthesizerType.tp_new = Synthesizer_new;
-    SynthesizerType.tp_methods = Synthesizer_methods;
-	SynthesizerType.tp_dealloc = (destructor)Synthesizer_dealloc;
-	if (PyType_Ready(&SynthesizerType) < 0) return -1;
-
-	Py_INCREF(&SynthesizerType);
-    if (PyModule_AddObject(m, "Synthesizer", (PyObject *) &SynthesizerType) < 0) {
-        Py_DECREF(&SynthesizerType);
-        return -1;
-    }
-
     return 0;
 }
 
