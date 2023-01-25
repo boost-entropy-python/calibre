@@ -3,13 +3,22 @@
 
 
 import json
+import struct
 import sys
 from contextlib import closing
 from queue import Queue
 from threading import Thread
 
+from calibre.utils.shm import SharedMemory
 from calibre.utils.ipc.simple_worker import start_pipe_worker
 
+SSML_SAMPLE = '''
+<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
+    <voice name="en-US-AriaNeural">
+        We are selling <bookmark mark='flower_1'/>roses and <bookmark mark='flower_2'/>daisies.
+    </voice>
+</speak>
+'''
 
 def decode_msg(line: bytes) -> dict:
     parts = line.strip().split(b' ', 2)
@@ -23,7 +32,36 @@ def start_worker():
     return start_pipe_worker('from calibre_extensions.winspeech import run_main_loop; raise SystemExit(run_main_loop())')
 
 
-def develop_speech(text='Lucca brazzi sleeps with the fishes'):
+def max_buffer_size(text) -> int:
+    if isinstance(text, str):
+        text = [text]
+    ans = 0
+    for x in text:
+        if isinstance(x, int):
+            ans += 5
+        else:
+            ans += 4 * len(x)
+    return ans
+
+
+def encode_to_file_object(text, output) -> int:
+    if isinstance(text, str):
+        text = [text]
+    p = struct.pack
+    sz = 0
+    for x in text:
+        if isinstance(x, int):
+            output.write(b'\0')
+            output.write(p('=I', x))
+            sz += 5
+        else:
+            b = x.encode('utf-8')
+            output.write(b)
+            sz += len(b)
+    return sz
+
+
+def develop_speech(text='Lucca Brazzi sleeps with the fishes.', mark_words=False):
     p = start_worker()
     print('\x1b[32mSpeaking', text, '\x1b[39m]]'[:-2], flush=True)
     q = Queue()
@@ -40,17 +78,35 @@ def develop_speech(text='Lucca brazzi sleeps with the fishes'):
         p.stdin.flush()
 
     Thread(name='Echo', target=echo_output, args=(p,), daemon=True).start()
-    with closing(p.stdin), closing(p.stdout):
+    exit_code = 0
+    st = 'ssml' if '<speak' in text else 'text'
+    if mark_words:
+        words = text.split()
+        text = []
+        for i, w in enumerate(words):
+            text.append(i+1)
+            text.append(w)
+            if w is not words[-1]:
+                text.append(' ')
+    with closing(p.stdin), closing(p.stdout), SharedMemory(size=max_buffer_size(text)) as shm:
+        sz = encode_to_file_object(text, shm)
         try:
             send('1 echo Synthesizer started')
-            send('2 speak text inline', text)
+            send('1 volume 0.1')
+            send(f'2 speak {st} shm {sz} {shm.name}')
             while True:
                 m = q.get()
+                if m['related_to'] != 2:
+                    continue
                 if m['payload_type'] == 'media_state_changed' and m['state'] == 'ended':
                     break
-            send('3 echo Synthesizer exiting')
-            send('exit')
-            p.wait(1)
+                if m['payload_type'] == 'error':
+                    exit_code = 1
+                    break
+            send(f'3 echo Synthesizer exiting with exit code: {exit_code}')
+            send(f'4 exit {exit_code}')
+            raise SystemExit(p.wait(1))
         finally:
             if p.poll() is None:
                 p.kill()
+                raise SystemExit(1)
