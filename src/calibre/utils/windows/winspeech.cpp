@@ -6,19 +6,10 @@
  */
 #include "common.h"
 
-#include <algorithm>
 #include <atomic>
 #include <filesystem>
-#include <array>
-#include <string>
 #include <string_view>
-#include <vector>
-#include <map>
-#include <deque>
-#include <charconv>
-#include <memory>
 #include <fstream>
-#include <sstream>
 #include <mutex>
 #include <filesystem>
 #include <functional>
@@ -32,6 +23,8 @@
 #include <winrt/windows.media.speechsynthesis.h>
 #include <winrt/windows.media.core.h>
 #include <winrt/windows.media.playback.h>
+#include <winrt/windows.media.devices.h>
+#include <winrt/windows.devices.enumeration.h>
 
 #ifdef max
 #undef max
@@ -41,6 +34,8 @@ using namespace winrt::Windows::Foundation::Collections;
 using namespace winrt::Windows::Media::SpeechSynthesis;
 using namespace winrt::Windows::Media::Playback;
 using namespace winrt::Windows::Media::Core;
+using namespace winrt::Windows::Media::Devices;
+using namespace winrt::Windows::Devices::Enumeration;
 using namespace winrt::Windows::Storage::Streams;
 typedef uint64_t id_type;
 
@@ -257,18 +252,58 @@ public:
             case VoiceGender::Female: gender = "female"; break;
         }
         object = {
-            {"display_name", json_val(voice.DisplayName())},
-            {"description", json_val(voice.Description())},
-            {"id", json_val(voice.Id())},
-            {"language", json_val(voice.Language())},
-            {"gender", json_val(gender)},
+            {"display_name", voice.DisplayName()},
+            {"description", voice.Description()},
+            {"id", voice.Id()},
+            {"language", voice.Language()},
+            {"gender", gender},
         };
     }
 
     json_val(IVectorView<VoiceInformation> const& voices) : type(DT_LIST) {
         list.reserve(voices.Size());
         for(auto const& voice : voices) {
-            list.emplace_back(json_val(voice));
+            list.emplace_back(voice);
+        }
+    }
+
+    json_val(DeviceInformationKind const dev) : type(DT_STRING) {
+        switch(dev) {
+            case DeviceInformationKind::Unknown:
+                s = "unknown"; break;
+            case DeviceInformationKind::AssociationEndpoint:
+                s = "association_endpoint"; break;
+            case DeviceInformationKind::AssociationEndpointContainer:
+                s = "association_endpoint_container"; break;
+            case DeviceInformationKind::AssociationEndpointService:
+                s = "association_endpoint_service"; break;
+            case DeviceInformationKind::Device:
+                s = "device"; break;
+            case DeviceInformationKind::DevicePanel:
+                s = "device_panel"; break;
+            case DeviceInformationKind::DeviceInterface:
+                s = "device_interface"; break;
+            case DeviceInformationKind::DeviceInterfaceClass:
+                s = "device_interface_class"; break;
+            case DeviceInformationKind::DeviceContainer:
+                s = "device_container"; break;
+        }
+    }
+
+    json_val(DeviceInformation const& dev) : type(DT_OBJECT) {
+        object = {
+            {"id", dev.Id()},
+            {"name", dev.Name()},
+            {"kind", dev.Kind()},
+            {"is_default", dev.IsDefault()},
+            {"is_enabled", dev.IsEnabled()},
+        };
+    }
+
+    json_val(DeviceInformationCollection const& devices) : type(DT_LIST) {
+        list.reserve(devices.Size());
+        for(auto const& dev : devices) {
+            list.emplace_back(json_val(dev));
         }
     }
 
@@ -309,26 +344,22 @@ public:
         };
     }
 
-    template<typename T> json_val(T x) {
-        static_assert(sizeof(bool) < sizeof(int16_t), "The bool type on this machine is more than one byte");
-        if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, int32_t> || std::is_same_v<T, int16_t>) {
-            type = DT_INT;
-            i = x;
-        } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, uint32_t> || std::is_same_v<T, uint16_t>) {
-            type = DT_UINT;
-            u = x;
-        } else if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-            type = DT_FLOAT;
-            f = x;
-        } else if constexpr (std::is_same_v<T, bool>) {
+    template<typename T> json_val(T const x) {
+        if constexpr (std::is_same_v<T, bool>) {
             type = DT_BOOL;
             b = x;
+        } else if constexpr (std::is_unsigned_v<T>) {
+            type = DT_UINT;
+            u = x;
+        } else if constexpr (std::is_integral_v<T>) {
+            type = DT_INT;
+            i = x;
+        } else if constexpr (std::is_floating_point_v<T>) {
+            type = DT_FLOAT;
+            f = x;
+        } else {
+            static_assert(!sizeof(T), "Unknown type T cannot be converted to JSON");
         }
-#ifdef _MSVC
-        else {
-            static_assert(false, "Unknown type T cannot be converted to JSON");
-        }
-#endif
     }
 
     friend std::ostream& operator<<(std::ostream &os, const json_val &self) {
@@ -353,20 +384,28 @@ output_error(id_type cmd_id, std::string_view const &msg, std::string_view const
     output(cmd_id, "error", std::move(m));
 }
 
-#define CATCH_ALL_EXCEPTIONS(msg, cmd_id) \
-  catch(winrt::hresult_error const& ex) { \
-    output_error(cmd_id, msg, winrt::to_string(ex.message()), __LINE__, ex.to_abi()); \
-} catch(const std::system_error& ex) { \
-    output_error(cmd_id, msg, "system_error with code: " + std::to_string(ex.code().value()) + " and meaning: " + ex.what(), __LINE__); \
-} catch (std::exception const &ex) { \
-    output_error(cmd_id, msg, ex.what(), __LINE__); \
-} catch (std::string const &ex) { \
-    output_error(cmd_id, msg, ex, __LINE__); \
-} catch (std::wstring const &ex) { \
-    output_error(cmd_id, msg, winrt::to_string(ex), __LINE__); \
-} catch (...) { \
-    output_error(cmd_id, msg, "Unknown exception type was raised", __LINE__); \
+static bool
+run_catching_exceptions(std::function<void(void)> f, std::string_view const &msg, int64_t line, id_type cmd_id=0) {
+    bool ok = false;
+    try {
+        f();
+        ok = true;
+    } catch(winrt::hresult_error const& ex) {
+        output_error(cmd_id, msg, winrt::to_string(ex.message()), line, ex.to_abi());
+    } catch(const std::system_error& ex) {
+        output_error(cmd_id, msg, "system_error with code: " + std::to_string(ex.code().value()) + " and meaning: " + ex.what(), line);
+    } catch (std::exception const &ex) {
+        output_error(cmd_id, msg, ex.what(), line);
+    } catch (std::string const &ex) {
+        output_error(cmd_id, msg, ex, line);
+    } catch (std::wstring const &ex) {
+        output_error(cmd_id, msg, winrt::to_string(ex), line);
+    } catch (...) {
+        output_error(cmd_id, msg, "Unknown exception type was raised", line);
+    }
+    return ok;
 }
+
 
 struct Revokers {
     MediaPlaybackSession::PlaybackStateChanged_revoker playback_state_changed;
@@ -383,87 +422,15 @@ struct Mark {
     uint32_t id, pos_in_text;
     Mark(uint32_t id, uint32_t pos) : id(id), pos_in_text(pos) {}
 };
-typedef std::vector<Mark> Marks;
 
-class Synthesizer {
-    private:
-    SpeechSynthesizer synth{nullptr};
-    MediaPlayer player{nullptr};
-    MediaSource current_source{nullptr};
-    SpeechSynthesisStream current_stream{nullptr};
-    MediaPlaybackItem current_item{nullptr};
-    std::vector<wchar_t> current_text_storage;
-    Marks current_marks;
+struct Marks {
+    std::vector<Mark> entries;
     int32_t last_reported_mark_index;
-    std::atomic<id_type> current_cmd_id;
-
-    Revokers revoker;
-    std::recursive_mutex recursive_lock;
-
-    public:
-    // Speak {{{
-    void register_metadata_handler_for_track(uint32_t index, id_type cmd_id);
-    void load_stream_for_playback(SpeechSynthesisStream const &&stream, id_type cmd_id, bool is_cued);
-    winrt::fire_and_forget speak(id_type cmd_id, std::wstring_view const &text, bool is_ssml, bool is_cued, std::vector<wchar_t> &&buf, Marks const && marks);
-    void register_metadata_handler_for_speech(id_type cmd_id, long index);
-    bool cmd_id_is_current(id_type cmd_id) const noexcept { return current_cmd_id.load() == cmd_id; }
-    void on_cue_entered(id_type cmd_id, const winrt::hstring &label, const SpeechCue &cue);
-    // }}}
-
-    winrt::fire_and_forget save(id_type cmd_id, std::wstring_view const &text, bool is_ssml, std::vector<wchar_t> &&buf, std::filesystem::path path);
-    void start_save_stream(SpeechSynthesisStream const &&stream, std::filesystem::path path, id_type cmd_id);
-
-    void initialize() {
-        synth = SpeechSynthesizer();
-        player = MediaPlayer();
-        player.AudioCategory(MediaPlayerAudioCategory::Speech);
-        player.AutoPlay(true);
-    }
-
-    void output(id_type cmd_id, std::string_view const& type, json_val const && x) {
-        std::scoped_lock sl(recursive_lock);
-        if (cmd_id_is_current(cmd_id)) ::output(cmd_id, type, std::move(x));
-    }
-
-    void stop_current_activity() {
-        std::scoped_lock sl(recursive_lock);
-        if (current_cmd_id.load()) {
-            current_cmd_id.store(0);
-            revoker = {};
-            current_source = MediaSource{nullptr};
-            current_stream = SpeechSynthesisStream{nullptr};
-            current_item = MediaPlaybackItem{nullptr};
-            player.Pause();
-            current_text_storage = std::vector<wchar_t>();
-            current_marks = Marks();
-            last_reported_mark_index = -1;
-        }
-    }
-
-    double volume() const {
-        return synth.Options().AudioVolume();
-    }
-
-    void volume(double val) {
-        if (val < 0 || val > 1) throw std::out_of_range("Invalid volume value must be between 0 and 1");
-        std::scoped_lock sl(recursive_lock);
-        synth.Options().AudioVolume(val);
-    }
-
-    double rate() const {
-        return synth.Options().SpeakingRate();
-    }
-
-    void rate(double val) {
-        if (val < 0.5 || val > 6.0) throw std::out_of_range("Invalid rate value must be between 0.5 and 6");
-        std::scoped_lock sl(recursive_lock);
-        synth.Options().SpeakingRate(val);
-    }
-
-
+    Marks() : entries(), last_reported_mark_index(-1) {}
 };
 
-static Synthesizer sx;
+static SpeechSynthesizer speech_synthesizer{nullptr};
+static MediaPlayer media_player{nullptr};
 
 static size_t
 decode_into(std::string_view src, std::wstring_view dest) {
@@ -489,7 +456,7 @@ parse_cued_text(std::string_view src, Marks &marks, std::wstring_view dest) {
             src = src.substr(1, src.size() - 1);
             if (src.size() >= 4) {
                 uint32_t mark = *((uint32_t*)src.data());
-                marks.emplace_back(mark, (uint32_t)dest_pos);
+                marks.entries.emplace_back(mark, (uint32_t)dest_pos);
                 src = src.substr(4, src.size() - 4);
             }
         }
@@ -519,124 +486,45 @@ read_from_shm(id_type cmd_id, const std::wstring_view size, const std::wstring &
 
 
 // Speak {{{
-void Synthesizer::on_cue_entered(id_type cmd_id, const winrt::hstring &label, const SpeechCue &cue) {
-    std::scoped_lock sl(recursive_lock);
-    if (!cmd_id_is_current(cmd_id)) return;
-    output(cmd_id, "cue_entered", json_val(label, cue));
-    if (label != L"SpeechWord") return;
-    uint32_t pos = cue.StartPositionInInput().Value();
-    for (int32_t i = std::max(0, last_reported_mark_index); i < (int32_t)current_marks.size(); i++) {
-        int32_t idx = -1;
-        if (current_marks[i].pos_in_text > pos) {
-            idx = i-1;
-            if (idx == last_reported_mark_index && current_marks[i].pos_in_text - pos < 3) idx = i;
-        } else if (current_marks[i].pos_in_text == pos) idx = i;
-        if (idx > -1) {
-            output(cmd_id, "mark_reached", {{"id", current_marks[idx].id}});
-            last_reported_mark_index = idx;
-            break;
-        }
-    }
-}
+static Revokers speak_revoker = {};
 
-void Synthesizer::register_metadata_handler_for_speech(id_type cmd_id, long index) {
-    std::scoped_lock sl(recursive_lock);
-    if (!cmd_id_is_current(cmd_id)) return;
-    if (index < 0) {
-        for (uint32_t i = 0; i < current_item.TimedMetadataTracks().Size(); i++) {
-            register_metadata_handler_for_track(i, cmd_id);
-        }
-    } else {
-        register_metadata_handler_for_track(index, cmd_id);
-    }
-}
+static void
+register_metadata_handler_for_track(MediaPlaybackTimedMetadataTrackList const &tracks, uint32_t index, id_type cmd_id, std::shared_ptr<Marks> marks) {
+    TimedMetadataTrack track = tracks.GetAt(index);
+    tracks.SetPresentationMode((unsigned int)index, TimedMetadataTrackPresentationMode::ApplicationPresented);
 
-void
-Synthesizer::register_metadata_handler_for_track(uint32_t index, id_type cmd_id) {
-    TimedMetadataTrack track = current_item.TimedMetadataTracks().GetAt(index);
-    std::scoped_lock sl(recursive_lock);
-    if (current_cmd_id.load() != cmd_id) return;
-    revoker.cue_entered.push_back(track.CueEntered(winrt::auto_revoke, [cmd_id](auto track, const auto& args) {
-        if (main_loop_is_running.load()) sx.on_cue_entered(cmd_id, track.Label(), args.Cue().template as<SpeechCue>());
+    speak_revoker.cue_entered.emplace_back(track.CueEntered(winrt::auto_revoke, [cmd_id, marks](auto track, const auto& args) {
+        if (!main_loop_is_running.load()) return;
+        auto label = track.Label();
+        auto cue = args.Cue().template as<SpeechCue>();
+        output(cmd_id, "cue_entered", {label, cue});
+        if (label != L"SpeechWord") return;
+        uint32_t pos = cue.StartPositionInInput().Value();
+        for (int32_t i = std::max(0, marks->last_reported_mark_index); i < (int32_t)marks->entries.size(); i++) {
+            int32_t idx = -1;
+            if (marks->entries[i].pos_in_text > pos) {
+                idx = i-1;
+                if (idx == marks->last_reported_mark_index && marks->entries[i].pos_in_text - pos < 3) idx = i;
+            } else if (marks->entries[i].pos_in_text == pos) idx = i;
+            if (idx > -1) {
+                output(cmd_id, "mark_reached", {{"id", marks->entries[idx].id}});
+                marks->last_reported_mark_index = idx;
+                break;
+            }
+        }
     }));
-    revoker.cue_exited.push_back(track.CueExited(winrt::auto_revoke, [cmd_id](auto track, const auto& args) {
-        if (main_loop_is_running.load()) sx.output(
+
+    speak_revoker.cue_exited.emplace_back(track.CueExited(winrt::auto_revoke, [cmd_id](auto track, const auto& args) {
+        if (main_loop_is_running.load()) output(
             cmd_id, "cue_exited", json_val(track.Label(), args.Cue().template as<SpeechCue>()));
     }));
-    revoker.track_failed.push_back(track.TrackFailed(winrt::auto_revoke, [cmd_id](auto, const auto& args) {
-        if (main_loop_is_running.load()) sx.output(
+
+    speak_revoker.track_failed.emplace_back(track.TrackFailed(winrt::auto_revoke, [cmd_id](auto, const auto& args) {
+        if (main_loop_is_running.load()) output(
             cmd_id, "track_failed", {});
     }));
-    current_item.TimedMetadataTracks().SetPresentationMode((unsigned int)index, TimedMetadataTrackPresentationMode::ApplicationPresented);
-}
+};
 
-void
-Synthesizer::load_stream_for_playback(SpeechSynthesisStream const &&stream, id_type cmd_id, bool is_cued) {
-    std::scoped_lock sl(recursive_lock);
-    if (cmd_id != current_cmd_id.load()) return;
-    current_stream = stream;
-    current_source = MediaSource::CreateFromStream(current_stream, current_stream.ContentType());
-
-    revoker.playback_state_changed = player.PlaybackSession().PlaybackStateChanged(
-            winrt::auto_revoke, [cmd_id](auto session, auto const&) {
-        if (main_loop_is_running.load()) sx.output(
-            cmd_id, "playback_state_changed", {{"state", session.PlaybackState()}});
-    });
-    revoker.media_opened = player.MediaOpened(winrt::auto_revoke, [cmd_id](auto player, auto const&) {
-        if (main_loop_is_running.load()) sx.output(
-            cmd_id, "media_state_changed", {{"state", "opened"}});
-    });
-    revoker.media_ended = player.MediaEnded(winrt::auto_revoke, [cmd_id](auto player, auto const&) {
-        if (main_loop_is_running.load()) sx.output(
-            cmd_id, "media_state_changed", {{"state", "ended"}});
-    });
-    revoker.media_failed = player.MediaFailed(winrt::auto_revoke, [cmd_id](auto player, auto const& args) {
-        if (main_loop_is_running.load()) sx.output(
-            cmd_id, "media_state_changed", {{"state", "failed"}, {"error", args.ErrorMessage()}, {"code", args.Error()}});
-    });
-    current_item = MediaPlaybackItem(current_source);
-
-    revoker.timed_metadata_tracks_changed = current_item.TimedMetadataTracksChanged(winrt::auto_revoke,
-        [cmd_id](auto, auto const &args) {
-        auto change_type = args.CollectionChange();
-        long index;
-        switch (change_type) {
-            case CollectionChange::ItemInserted: index = args.Index(); break;
-            case CollectionChange::Reset: index = -1; break;
-            default: index = -2; break;
-        }
-        if (index > -2 && main_loop_is_running.load()) sx.register_metadata_handler_for_speech(cmd_id, index);
-    });
-    register_metadata_handler_for_speech(cmd_id, -1);
-
-    player.Source(current_item);
-}
-
-winrt::fire_and_forget Synthesizer::speak(id_type cmd_id, std::wstring_view const &text, bool is_ssml, bool is_cued, std::vector<wchar_t> &&buf, Marks const && marks) {
-    SpeechSynthesisStream stream{nullptr};
-    { std::scoped_lock sl(recursive_lock);
-        stop_current_activity();
-        current_cmd_id.store(cmd_id);
-        current_text_storage = std::move(buf);
-        current_marks = std::move(marks);
-        synth.Options().IncludeSentenceBoundaryMetadata(true);
-        synth.Options().IncludeWordBoundaryMetadata(true);
-    }
-    output(cmd_id, "synthesizing", {{"ssml", is_ssml}, {"num_marks", current_marks.size()}, {"text_length", text.size()}});
-    bool ok = false;
-    try {
-        if (is_ssml) stream = co_await synth.SynthesizeSsmlToStreamAsync(text);
-        else stream = co_await synth.SynthesizeTextToStreamAsync(text);
-        ok = true;
-    } CATCH_ALL_EXCEPTIONS("Failed to synthesize speech", cmd_id);
-    if (ok) {
-        if (main_loop_is_running.load()) {
-            try {
-                load_stream_for_playback(std::move(stream), cmd_id, is_cued);
-            } CATCH_ALL_EXCEPTIONS("Failed to load synthesized stream for playback", cmd_id);
-        }
-    }
-}
 
 static void
 handle_speak(id_type cmd_id, std::vector<std::wstring_view> &parts) {
@@ -650,11 +538,11 @@ handle_speak(id_type cmd_id, std::vector<std::wstring_view> &parts) {
     }
     parts.erase(parts.begin(), parts.begin() + 2);
     std::wstring address;
-    Marks marks;
+    auto marks = std::make_shared<Marks>();
     std::vector<wchar_t> buf;
     std::wstring_view text;
     if (is_shm) {
-        text = read_from_shm(cmd_id, parts.at(0), std::wstring(parts.at(1)), buf, marks, is_cued);
+        text = read_from_shm(cmd_id, parts.at(0), std::wstring(parts.at(1)), buf, *marks, is_cued);
         if (text.size() == 0) return;
     } else {
         address = join(parts);
@@ -664,12 +552,60 @@ handle_speak(id_type cmd_id, std::vector<std::wstring_view> &parts) {
         address.copy(buf.data(), address.size());
     }
     *((wchar_t*)text.data() + text.size()) = 0;  // ensure NULL termination
-    sx.speak(cmd_id, text, is_ssml, is_cued, std::move(buf), std::move(marks));
+
+    output(cmd_id, "synthesizing", {{"ssml", is_ssml}, {"num_marks", marks->entries.size()}, {"text_length", text.size()}});
+    SpeechSynthesisStream stream{nullptr};
+    if (!run_catching_exceptions([&]() {
+        speech_synthesizer.Options().IncludeSentenceBoundaryMetadata(true);
+        speech_synthesizer.Options().IncludeWordBoundaryMetadata(true);
+        if (is_ssml) stream = speech_synthesizer.SynthesizeSsmlToStreamAsync(text).get();
+        else stream = speech_synthesizer.SynthesizeTextToStreamAsync(text).get();
+    }, "Failed to synthesize speech", __LINE__, cmd_id)) return;
+
+    speak_revoker = {};  // delete any revokers previously installed
+    MediaSource source(MediaSource::CreateFromStream(stream, stream.ContentType()));
+
+    speak_revoker.playback_state_changed = media_player.PlaybackSession().PlaybackStateChanged(
+            winrt::auto_revoke, [cmd_id](auto session, auto const&) {
+        if (main_loop_is_running.load()) output(
+            cmd_id, "playback_state_changed", {{"state", session.PlaybackState()}});
+    });
+    speak_revoker.media_opened = media_player.MediaOpened(winrt::auto_revoke, [cmd_id](auto player, auto const&) {
+        if (main_loop_is_running.load()) output(
+            cmd_id, "media_state_changed", {{"state", "opened"}});
+    });
+    speak_revoker.media_ended = media_player.MediaEnded(winrt::auto_revoke, [cmd_id](auto player, auto const&) {
+        if (main_loop_is_running.load()) output(
+            cmd_id, "media_state_changed", {{"state", "ended"}});
+    });
+    speak_revoker.media_failed = media_player.MediaFailed(winrt::auto_revoke, [cmd_id](auto player, auto const& args) {
+        if (main_loop_is_running.load()) output(
+            cmd_id, "media_state_changed", {{"state", "failed"}, {"error", args.ErrorMessage()}, {"code", args.Error()}});
+    });
+    auto playback_item = std::make_shared<MediaPlaybackItem>(source);
+
+    speak_revoker.timed_metadata_tracks_changed = playback_item->TimedMetadataTracksChanged(winrt::auto_revoke,
+        [cmd_id, playback_item_weak_ref = std::weak_ptr(playback_item), marks](auto, auto const &args) {
+        auto change_type = args.CollectionChange();
+        long index;
+        switch (change_type) {
+            case CollectionChange::ItemInserted: index = args.Index(); break;
+            case CollectionChange::Reset: index = -1; break;
+            default: index = -2; break;
+        }
+        auto pi{ playback_item_weak_ref.lock() };
+        if (index > -2 && pi && main_loop_is_running.load()) register_metadata_handler_for_track(pi->TimedMetadataTracks(), index, cmd_id, marks);
+    });
+
+    for (uint32_t i = 0; i < playback_item->TimedMetadataTracks().Size(); i++) {
+        register_metadata_handler_for_track(playback_item->TimedMetadataTracks(), i, cmd_id, marks);
+    }
+    media_player.Source(*playback_item);
 }
 // }}}
 
 // Save {{{
-static winrt::fire_and_forget
+static void
 save_stream(SpeechSynthesisStream const &&stream, std::filesystem::path path, id_type cmd_id) {
     unsigned long long stream_size = stream.Size(), bytes_read = 0;
     DataReader reader(stream);
@@ -677,64 +613,24 @@ save_stream(SpeechSynthesisStream const &&stream, std::filesystem::path path, id
     const static unsigned int chunk_size = 16 * 1024;
     std::array<uint8_t, chunk_size> buf;
     std::ofstream outfile;
-    bool ok = false;
-    try {
+    if (!run_catching_exceptions([&](){
         outfile.open(path.string(), std::ios::out | std::ios::trunc);
-        ok = true;
-    } CATCH_ALL_EXCEPTIONS("Failed to create file: " + path.string(), cmd_id);
-    if (!ok) co_return;
+    }, "Failed to create file: " + path.string(), __LINE__, cmd_id)) return;
+
     while (bytes_read < stream_size) {
-        try {
-            n = co_await reader.LoadAsync(chunk_size);
-            ok = true;
-        } CATCH_ALL_EXCEPTIONS("Failed to load data from DataReader", cmd_id);
-        if (!ok) co_return;
+        if (!run_catching_exceptions([&]() {
+            n = reader.LoadAsync(chunk_size).get();
+        }, "Failed to load data from DataReader", __LINE__, cmd_id)) return;
         if (n > 0) {
             bytes_read += n;
-            ok = false;
-            try {
+            if (!run_catching_exceptions([&]() {
                 reader.ReadBytes(winrt::array_view(buf.data(), buf.data() + n));
                 outfile.write((const char*)buf.data(), n);
                 if (!outfile.good()) throw "Failed to write to output file";
-                ok = true;
-            } CATCH_ALL_EXCEPTIONS("Failed to save bytes from DataReader to file", cmd_id);
-            if (!ok) co_return;
+            }, "Failed to save bytes from DataReader to file", __LINE__, cmd_id)) return;
         }
     }
     output(cmd_id, "saved", {{"size", bytes_read}});
-}
-
-void
-Synthesizer::start_save_stream(SpeechSynthesisStream const &&stream, std::filesystem::path path, id_type cmd_id) {
-    std::scoped_lock sl(recursive_lock);
-    try {
-        save_stream(std::move(stream), path, cmd_id);
-    } CATCH_ALL_EXCEPTIONS("Failed to save loaded stream", cmd_id);
-    stop_current_activity();
-}
-
-winrt::fire_and_forget Synthesizer::save(id_type cmd_id, std::wstring_view const &text, bool is_ssml, std::vector<wchar_t> &&buf, std::filesystem::path path) {
-    SpeechSynthesisStream stream{nullptr};
-    { std::scoped_lock sl(recursive_lock);
-        stop_current_activity();
-        current_cmd_id.store(cmd_id);
-        current_text_storage = std::move(buf);
-        synth.Options().IncludeSentenceBoundaryMetadata(false);
-        synth.Options().IncludeWordBoundaryMetadata(false);
-    }
-    bool ok = false;
-    try {
-        if (is_ssml) stream = co_await synth.SynthesizeSsmlToStreamAsync(text);
-        else stream = co_await synth.SynthesizeTextToStreamAsync(text);
-        ok = true;
-    } CATCH_ALL_EXCEPTIONS("Failed to synthesize speech", cmd_id);
-    if (ok) {
-        if (main_loop_is_running.load()) {
-            try {
-                sx.start_save_stream(std::move(stream), path, cmd_id);
-            } CATCH_ALL_EXCEPTIONS("Failed to load synthesized stream for save", cmd_id);
-        }
-    }
 }
 
 static void
@@ -755,9 +651,144 @@ handle_save(id_type cmd_id, std::vector<std::wstring_view> &parts) {
     auto filename = join(parts);
     auto path = std::filesystem::absolute(filename);
     output(cmd_id, "saving", {{"ssml", is_ssml}, {"output_path", path.string()}});
-    sx.save(cmd_id, text, is_ssml, std::move(buf), path);
+    SpeechSynthesisStream stream{nullptr};
+    speech_synthesizer.Options().IncludeSentenceBoundaryMetadata(false);
+    speech_synthesizer.Options().IncludeWordBoundaryMetadata(false);
+    if (!run_catching_exceptions([&]() {
+        if (is_ssml) stream = speech_synthesizer.SynthesizeSsmlToStreamAsync(text).get();
+        else stream = speech_synthesizer.SynthesizeTextToStreamAsync(text).get();
+    }, "Failed to synthesize speech", __LINE__, cmd_id)) return;
+    save_stream(std::move(stream), path, cmd_id);
 }
 // }}}
+
+
+typedef std::function<void(id_type, std::vector<std::wstring_view>, int64_t*)> handler_function;
+
+static DeviceInformationKind
+get_device_kind(const std::wstring x) {
+    if (x == L"device") return DeviceInformationKind::Device;
+    if (x == L"association_endpoint") return DeviceInformationKind::AssociationEndpoint;
+    if (x == L"association_endpoint_container") return DeviceInformationKind::AssociationEndpointContainer;
+    if (x == L"association_endpoint_service") return DeviceInformationKind::AssociationEndpointService;
+    if (x == L"device_container") return DeviceInformationKind::DeviceContainer;
+    if (x == L"device_interface") return DeviceInformationKind::DeviceInterface;
+    if (x == L"device_interface_class") return DeviceInformationKind::DeviceInterfaceClass;
+    if (x == L"device_panel") return DeviceInformationKind::DevicePanel;
+    return DeviceInformationKind::Unknown;
+}
+
+static const std::unordered_map<std::string, handler_function> handlers = {
+
+    {"exit", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t* exit_code) {
+        try {
+            *exit_code = parse_id(parts.at(0));
+        } catch(...) { }
+        *exit_code = 0;
+    }},
+
+    {"echo", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        output(cmd_id, "echo", {{"msg", join(parts)}});
+    }},
+
+    {"play", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        media_player.Play();
+        output(cmd_id, "play", {{"playback_state", media_player.PlaybackSession().PlaybackState()}});
+    }},
+
+    {"pause", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        media_player.Pause();
+        output(cmd_id, "pause", {{"playback_state", media_player.PlaybackSession().PlaybackState()}});
+    }},
+
+    {"state", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        auto ps = media_player.PlaybackSession();
+        if (ps) output(cmd_id, "state", {{"playback_state", ps.PlaybackState()}});
+        else output(cmd_id, "state", {{"playback_state", ""}});
+    }},
+
+    {"default_voice", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        output(cmd_id, "default_voice", {{"voice", SpeechSynthesizer::DefaultVoice()}});
+    }},
+
+    {"all_voices", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        output(cmd_id, "all_voices", {{"voices", SpeechSynthesizer::AllVoices()}});
+    }},
+
+    {"all_audio_devices", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        output(cmd_id, "all_audio_devices", {{"devices", DeviceInformation::FindAllAsync(MediaDevice::GetAudioRenderSelector()).get()}});
+    }},
+
+    {"speak", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        handle_speak(cmd_id, parts);
+    }},
+
+    {"audio_device", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        bool found = false;
+        if (parts.size()) {
+            auto device_kind = std::wstring(parts.at(0));
+            parts.erase(parts.begin(), parts.begin() + 1);
+            auto device_id = join(parts);
+            auto di = DeviceInformation::CreateFromIdAsync(device_id, {}, get_device_kind(device_kind)).get();
+            if (di) {
+                media_player.AudioDevice(di);
+                found = true;
+            }
+        }
+        auto x = media_player.AudioDevice();
+        if (x) output(cmd_id, "audio_device", {{"value", x}, {"found", found}});
+        else output(cmd_id, "audio_device", {{"value", ""}, {"found", found}});
+    }},
+
+    {"voice", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        bool found = false;
+        if (parts.size()) {
+            auto voice_id = winrt::hstring(parts.at(0));
+            for (auto const &candidate : SpeechSynthesizer::AllVoices()) {
+                if (candidate.Id() == voice_id) {
+                    speech_synthesizer.Voice(candidate);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        auto x = speech_synthesizer.Voice();
+        if (x) output(cmd_id, "voice", {{"value", speech_synthesizer.Voice()}, {"found", found}});
+        else output(cmd_id, "voice", {{"value", ""}, {"found", found}});
+    }},
+
+    {"volume", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        if (parts.size()) {
+            auto vol = parse_double(parts.at(0).data());
+            if (vol < 0 || vol > 1) throw std::out_of_range("Invalid volume value must be between 0 and 1");
+            speech_synthesizer.Options().AudioVolume(vol);
+        }
+        output(cmd_id, "volume", {{"value", speech_synthesizer.Options().AudioVolume()}});
+    }},
+
+    {"rate", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        if (parts.size()) {
+            auto rate = parse_double(parts.at(0).data());
+            if (rate < 0.5 || rate > 6.0) throw std::out_of_range("Invalid rate value must be between 0.5 and 6");
+            speech_synthesizer.Options().SpeakingRate(rate);
+        }
+        output(cmd_id, "rate", {{"value", speech_synthesizer.Options().SpeakingRate()}});
+    }},
+
+    {"pitch", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        if (parts.size()) {
+            auto pitch = parse_double(parts.at(0).data());
+            if (pitch < 0 || pitch > 2) throw std::out_of_range("Invalid pitch value must be between 0 and 2");
+            speech_synthesizer.Options().AudioPitch(pitch);
+        }
+        output(cmd_id, "pitch", {{"pitch", speech_synthesizer.Options().AudioPitch()}});
+    }},
+
+    {"save", [](id_type cmd_id, std::vector<std::wstring_view> parts, int64_t*) {
+        handle_save(cmd_id, parts);
+    }},
+};
+
 
 static int64_t
 handle_stdin_message(winrt::hstring const &&msg) {
@@ -768,7 +799,8 @@ handle_stdin_message(winrt::hstring const &&msg) {
     std::wstring_view command;
     bool ok = false;
     std::vector<std::wstring_view> parts;
-    try {
+    int64_t exit_code = -1;
+    if (!run_catching_exceptions([&]() {
         parts = split(msg);
         command = parts.at(1); cmd_id = parse_id(parts.at(0));
         if (cmd_id == 0) {
@@ -776,82 +808,60 @@ handle_stdin_message(winrt::hstring const &&msg) {
         }
         parts.erase(parts.begin(), parts.begin() + 2);
         ok = true;
-    } CATCH_ALL_EXCEPTIONS((std::string("Invalid input message: ") + winrt::to_string(msg)), 0);
-    if (!ok) return -1;
+    }, "Invalid input message: " + winrt::to_string(msg), __LINE__)) return exit_code;
+    handler_function handler;
+    std::string cmd(winrt::to_string(command));
     try {
-        if (command == L"exit") {
-            try {
-                return parse_id(parts.at(0));
-            } catch(...) { }
-            return 0;
-        }
-        else if (command == L"echo") {
-            output(cmd_id, "echo", {{"msg", join(parts)}});
-        }
-        else if (command == L"default_voice") {
-            output(cmd_id, "default_voice", SpeechSynthesizer::DefaultVoice());
-        }
-        else if (command == L"all_voices") {
-            output(cmd_id, "all_voices", SpeechSynthesizer::AllVoices());
-        }
-        else if (command == L"speak") {
-            handle_speak(cmd_id, parts);
-        }
-        else if (command == L"volume") {
-            if (parts.size()) {
-                auto vol = parse_double(parts[0].data());
-                sx.volume(vol);
-            }
-            output(cmd_id, "volume", {{"value", sx.volume()}});
-        }
-        else if (command == L"rate") {
-            if (parts.size()) {
-                auto rate = parse_double(parts[0].data());
-                sx.rate(rate);
-            }
-            output(cmd_id, "rate", {{"value", sx.rate()}});
-        }
-        else if (command == L"save") {
-            handle_save(cmd_id, parts);
-        }
-        else throw std::string("Unknown command: ") + winrt::to_string(command);
-    } CATCH_ALL_EXCEPTIONS("Error handling input message", cmd_id);
-    return -1;
+        handler = handlers.at(cmd.c_str());
+    } catch (std::out_of_range) {
+        output_error(cmd_id, "Unknown command", cmd, __LINE__);
+        return exit_code;
+    }
+    run_catching_exceptions([&]() {
+        handler(cmd_id, parts, &exit_code);
+    }, "Error handling input message", __LINE__, cmd_id);
+    return exit_code;
 }
-
 
 static PyObject*
 run_main_loop(PyObject*, PyObject*) {
-    try {
+    if (!run_catching_exceptions([]() {
         std::cout.imbue(std::locale("C"));
         std::cin.imbue(std::locale("C"));
         std::cerr.imbue(std::locale("C"));
         std::wcin.imbue(std::locale("C"));
         std::wcout.imbue(std::locale("C"));
         std::wcerr.imbue(std::locale("C"));
-    } CATCH_ALL_EXCEPTIONS("Failed to set stdio locales to C", 0);
-    winrt::init_apartment(winrt::apartment_type::multi_threaded);
-    main_thread_id = GetCurrentThreadId();
-    MSG msg;
-    int64_t exit_code = 0;
-    bool ok = false;
-    try {
-        new (&sx) Synthesizer();
-        sx.initialize();
-        ok = true;
-    } CATCH_ALL_EXCEPTIONS("Error initializing Synthesizer", 0);
-    if (!ok) return PyLong_FromUnsignedLongLong(1);
+    }, "Failed to set stdio locales to C", __LINE__)) {
+        return PyLong_FromLongLong(1);
+    }
 
-    Py_BEGIN_ALLOW_THREADS;
-    main_loop_is_running.store(true);
-    PeekMessage(&msg, NULL, WM_USER, WM_USER, PM_NOREMOVE);  // ensure we have a message queue
+    if (!run_catching_exceptions([]() {
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    }, "Failed to initialize COM", __LINE__)) {
+        return PyLong_FromLongLong(1);
+    }
+
+    main_thread_id = GetCurrentThreadId();
+
+    if (!run_catching_exceptions([]() {
+        speech_synthesizer = SpeechSynthesizer();
+        media_player = MediaPlayer();
+        media_player.AudioCategory(MediaPlayerAudioCategory::Speech);
+        media_player.AutoPlay(true);
+    }, "Failed to initialize SpeechSynthesizer and MediaPlayer", __LINE__)) {
+        return PyLong_FromLongLong(1);
+    }
 
     if (_isatty(_fileno(stdin))) {
         std::cout << "Welcome to winspeech. Type exit to quit." << std::endl;
     }
+    int64_t exit_code = -1;
+    main_loop_is_running.store(true);
 
+    Py_BEGIN_ALLOW_THREADS;
     std::string input_buffer;
-    while (true) {
+    while (exit_code < 0) {
         try {
             if (!std::getline(std::cin, input_buffer)) {
                 if (!std::cin.eof()) exit_code = 1;
@@ -859,7 +869,10 @@ run_main_loop(PyObject*, PyObject*) {
             }
             rtrim(input_buffer);
             if (input_buffer.size() > 0) {
-                if ((exit_code = handle_stdin_message(std::move(winrt::to_hstring(input_buffer)))) >= 0) break;
+                run_catching_exceptions([&]() {
+                    exit_code = handle_stdin_message(std::move(winrt::to_hstring(input_buffer)));
+                }, "Error handling STDIN message", __LINE__);
+                if (exit_code >= 0) break;
             }
         } catch(...) {
             exit_code = 1;
@@ -867,14 +880,14 @@ run_main_loop(PyObject*, PyObject*) {
             break;
         }
     }
-
-    main_loop_is_running.store(false);
     Py_END_ALLOW_THREADS;
 
+    main_loop_is_running.store(false);
     try {
-        sx.stop_current_activity();
-        (&sx)->~Synthesizer();
-    } CATCH_ALL_EXCEPTIONS("Error stopping all activity", 0);
+        speak_revoker = {};
+        speech_synthesizer = SpeechSynthesizer{nullptr};
+        media_player = MediaPlayer{nullptr};
+    } catch(...) {}
 
     return PyLong_FromLongLong(exit_code);
 }
