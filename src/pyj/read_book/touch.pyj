@@ -180,7 +180,9 @@ class TouchHandler:
             self.start_hold_timer()
 
     def handle_touchstart(self, ev):
-        ev.preventDefault(), ev.stopPropagation()
+        if jstype(ev.cancelable) is not 'boolean' or ev.cancelable:
+            ev.preventDefault()
+        ev.stopPropagation()
         self.prune_expired_touches()
         for touch in ev.changedTouches:
             self.ongoing_touches[touch_id(touch)] = copy_touch(touch)
@@ -193,7 +195,9 @@ class TouchHandler:
             self.start_hold_timer()
 
     def handle_touchmove(self, ev):
-        ev.preventDefault(), ev.stopPropagation()
+        if jstype(ev.cancelable) is not 'boolean' or ev.cancelable:
+            ev.preventDefault()
+        ev.stopPropagation()
         for touch in ev.changedTouches:
             t = self.ongoing_touches[touch_id(touch)]
             if t:
@@ -201,7 +205,9 @@ class TouchHandler:
                 self.dispatch_gesture()
 
     def handle_touchend(self, ev):
-        ev.preventDefault(), ev.stopPropagation()
+        if jstype(ev.cancelable) is not 'boolean' or ev.cancelable:
+            ev.preventDefault()
+        ev.stopPropagation()
         for touch in ev.changedTouches:
             t = self.ongoing_touches[touch_id(touch)]
             if t:
@@ -213,7 +219,9 @@ class TouchHandler:
             self.reset_handlers()
 
     def handle_touchcancel(self, ev):
-        ev.preventDefault(), ev.stopPropagation()
+        if jstype(ev.cancelable) is not 'boolean' or ev.cancelable:
+            ev.preventDefault()
+        ev.stopPropagation()
         for touch in ev.changedTouches:
             tid = touch_id(touch)  # noqa: unused-local
             v'delete self.ongoing_touches[tid]'
@@ -234,7 +242,7 @@ class TouchHandler:
         self.handle_gesture(gesture)
 
 def inch_in_pixels():
-    ans = inch_in_pixels().ans
+    ans = inch_in_pixels.ans
     if not ans:
         ans = inch_in_pixels.ans = max(2, get_unit_size_in_pixels('in'))
     return ans
