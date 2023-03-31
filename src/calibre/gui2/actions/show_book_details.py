@@ -24,20 +24,40 @@ class ShowBookDetailsAction(InterfaceAction):
         self.qaction.triggered.connect(self.show_book_info)
         self.memory = []
 
-    def show_book_info(self, *args):
-        if self.gui.current_view() is not self.gui.library_view:
+    def show_book_info(self, *args, **kwargs):
+        library_path = kwargs.get('library_path', None)
+        book_id = kwargs.get('book_id', None)
+        library_id = kwargs.get('library_id', None)
+        query = kwargs.get('query', None)
+        index = self.gui.library_view.currentIndex()
+        if self.gui.current_view() is not self.gui.library_view and not library_path:
             error_dialog(self.gui, _('No detailed info available'),
                 _('No detailed information is available for books '
                   'on the device.')).exec()
             return
-        index = self.gui.library_view.currentIndex()
-        if index.isValid():
-            d = BookInfo(self.gui, self.gui.library_view, index,
-                    self.gui.book_details.handle_click)
+        if library_path or index.isValid():
+            try:
+                d = BookInfo(self.gui, self.gui.library_view, index,
+                        self.gui.book_details.handle_click,
+                        library_id=library_id, library_path=library_path, book_id=book_id, query=query)
+            except ValueError as e:
+                error_dialog(self.gui, _('Book not found'), str(e)).exec()
+                return
+
             d.open_cover_with.connect(self.gui.bd_open_cover_with, type=Qt.ConnectionType.QueuedConnection)
             self.memory.append(d)
             d.closed.connect(self.closed, type=Qt.ConnectionType.QueuedConnection)
             d.show()
+
+    def shutting_down(self):
+        for d in self.memory:
+            d.close()
+        self.memory = []
+
+    def library_about_to_change(self, *args):
+        for d in self.memory:
+            if d.for_external_library:
+                d.close()
 
     def closed(self, d):
         try:
