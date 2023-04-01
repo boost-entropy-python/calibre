@@ -257,11 +257,7 @@ def render_html(mi, vertical, widget, all_fields=False, render_data_func=None,
 
 
 def get_field_list(fm, use_defaults=False, pref_name='book_display_fields', mi=None):
-    if mi is not None and hasattr(mi, '_bd_dbwref') and mi._bd_dbwref is not None:
-        db = mi._bd_dbwref
-    else:
-        from calibre.gui2.ui import get_gui
-        db = get_gui().current_db
+    db = db_for_mi(mi)
     if use_defaults:
         src = db.prefs.defaults
     else:
@@ -462,6 +458,7 @@ def create_copy_links(menu, data=None):
 
     menu.addSeparator()
     link(_('Link to show book in calibre'), f'calibre://show-book/{library_id}/{book_id}')
+    link(_('Link to show book details in a popup window'), f'calibre://book-details/{library_id}/{book_id}')
     if data:
         field = data.get('field')
         if data['type'] == 'author':
