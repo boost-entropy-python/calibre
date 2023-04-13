@@ -1848,9 +1848,11 @@ class Cache:
 
         :param formats_map: A mapping of book_id to a list of formats to be removed from the book.
         :param db_only: If True, only remove the record for the format from the db, do not delete the actual format file from the filesystem.
+        :return: A map of book id to set of formats actually deleted from the filesystem for that book
         '''
         table = self.fields['formats'].table
         formats_map = {book_id:frozenset((f or '').upper() for f in fmts) for book_id, fmts in iteritems(formats_map)}
+        removed_map = {}
 
         for book_id, fmts in iteritems(formats_map):
             for fmt in fmts:
@@ -1858,6 +1860,7 @@ class Cache:
 
         if not db_only:
             removes = defaultdict(set)
+            metadata_map = {}
             for book_id, fmts in iteritems(formats_map):
                 try:
                     path = self._field_for('path', book_id).replace('/', os.sep)
@@ -1870,8 +1873,10 @@ class Cache:
                         continue
                     if name and path:
                         removes[book_id].add((fmt, name, path))
+                if removes[book_id]:
+                    metadata_map[book_id] = {'title': self._field_for('title', book_id), 'authors': self._field_for('authors', book_id)}
             if removes:
-                self.backend.remove_formats(removes)
+                removed_map = self.backend.remove_formats(removes, metadata_map)
 
         size_map = table.remove_formats(formats_map, self.backend)
         self.fields['size'].table.update_sizes(size_map)
@@ -1881,6 +1886,7 @@ class Cache:
 
         self._update_last_modified(tuple(formats_map))
         self.event_dispatcher(EventType.formats_removed, formats_map)
+        return removed_map
 
     @read_api
     def get_next_series_num_for(self, series, field='series', current_indices=False):
@@ -2038,18 +2044,17 @@ class Cache:
     def remove_books(self, book_ids, permanent=False):
         ''' Remove the books specified by the book_ids from the database and delete
         their format files. If ``permanent`` is False, then the format files
-        are placed in the recycle bin. '''
+        are placed in the per-library trash directory. '''
         path_map = {}
         for book_id in book_ids:
             try:
                 path = self._field_for('path', book_id).replace('/', os.sep)
-            except:
+            except Exception:
                 path = None
             path_map[book_id] = path
-        if iswindows:
-            paths = (x.replace(os.sep, '/') for x in itervalues(path_map) if x)
-            self.backend.windows_check_if_files_in_use(paths)
-
+        # ensure metadata.opf is written so we can restore the book
+        if not permanent:
+            self._dump_metadata(book_ids=tuple(bid for bid, path in path_map.items() if path))
         self.backend.remove_books(path_map, permanent=permanent)
         for field in itervalues(self.fields):
             try:
@@ -2661,17 +2666,82 @@ class Cache:
     def is_closed(self):
         return self.backend.is_closed
 
+    @read_api
+    def list_trash_entries(self):
+        books, formats = self.backend.list_trash_entries()
+        ff = []
+        for e in formats:
+            if self._has_id(e.book_id):
+                ff.append(e)
+                e.cover_path = self.format_abspath(e.book_id, '__COVER_INTERNAL__')
+        return books, formats
+
+    @write_api
+    def move_format_from_trash(self, book_id, fmt):
+        ''' Undelete a format from the trash directory '''
+        if not self._has_id(book_id):
+            raise ValueError(f'A book with the id {book_id} does not exist')
+        fmt = fmt.upper()
+        try:
+            name = self.fields['formats'].format_fname(book_id, fmt)
+        except Exception:
+            name = None
+        fpath = self.backend.path_for_trash_format(book_id, fmt)
+        if not fpath:
+            raise ValueError(f'No format {fmt} found in book {book_id}')
+        size, fname = self._do_add_format(book_id, fmt, fpath, name)
+        self.format_metadata_cache.pop(book_id, None)
+        max_size = self.fields['formats'].table.update_fmt(book_id, fmt, fname, size, self.backend)
+        self.fields['size'].table.update_sizes({book_id: max_size})
+        self.event_dispatcher(EventType.format_added, book_id, fmt)
+        self.backend.remove_trash_formats_dir_if_empty(book_id)
+
+    @write_api
+    def move_book_from_trash(self, book_id):
+        ''' Undelete a book from the trash directory '''
+        if self._has_id(book_id):
+            raise ValueError(f'A book with the id {book_id} already exists')
+        mi, annotations, formats = self.backend.get_metadata_for_trash_book(book_id)
+        mi.cover = None
+        self._create_book_entry(mi, add_duplicates=True,
+                force_id=book_id, apply_import_tags=False, preserve_uuid=True)
+        path = self._field_for('path', book_id).replace('/', os.sep)
+        self.backend.move_book_from_trash(book_id, path)
+        self.format_metadata_cache.pop(book_id, None)
+        f = self.fields['formats'].table
+        max_size = 0
+        for (fmt, size, fname) in formats:
+            max_size = max(max_size, f.update_fmt(book_id, fmt, fname, size, self.backend))
+        self.fields['size'].table.update_sizes({book_id: max_size})
+        cover = self.backend.cover_abspath(book_id, path)
+        if cover and os.path.exists(cover):
+            self._set_field('cover', {book_id:1})
+        if annotations:
+            self._restore_annotations(book_id, annotations)
+
+    @write_api
+    def delete_trash_entry(self, book_id, category):
+        " Delete an entry from the trash. Here category is 'b' for books and 'f' for formats. "
+        self.backend.delete_trash_entry(book_id, category)
+
+    @write_api
+    def expire_old_trash(self):
+        ' Expire entries from the trash that are too old '
+        self.backend.expire_old_trash()
+
     @write_api
     def restore_book(self, book_id, mi, last_modified, path, formats, annotations=()):
         ''' Restore the book entry in the database for a book that already exists on the filesystem '''
-        cover = mi.cover
-        mi.cover = None
+        cover, mi.cover = mi.cover, None
         self._create_book_entry(mi, add_duplicates=True,
                 force_id=book_id, apply_import_tags=False, preserve_uuid=True)
         self._update_last_modified((book_id,), last_modified)
         if cover and os.path.exists(cover):
             self._set_field('cover', {book_id:1})
-        self.backend.restore_book(book_id, path, formats)
+        f = self.fields['formats'].table
+        for (fmt, size, fname) in formats:
+            f.update_fmt(book_id, fmt, fname, size, self.backend)
+        self.fields['path'].table.set_path(book_id, path, self.backend)
         if annotations:
             self._restore_annotations(book_id, annotations)
 

@@ -16,7 +16,7 @@ from threading import Thread
 
 from calibre import force_unicode, isbytestring
 from calibre.constants import filesystem_encoding
-from calibre.db.backend import DB, DBPrefs
+from calibre.db.backend import DB, TRASH_DIR_NAME, DBPrefs
 from calibre.db.cache import Cache
 from calibre.ebooks.metadata.opf2 import OPF
 from calibre.ptempfile import TemporaryDirectory
@@ -26,6 +26,26 @@ NON_EBOOK_EXTENSIONS = frozenset((
     'jpg', 'jpeg', 'gif', 'png', 'bmp',
     'opf', 'swp', 'swo'
 ))
+
+
+def read_opf(dirpath, read_annotations=True):
+    opf = os.path.join(dirpath, 'metadata.opf')
+    parsed_opf = OPF(opf, basedir=dirpath)
+    mi = parsed_opf.to_book_metadata()
+    annotations = tuple(parsed_opf.read_annotations()) if read_annotations else ()
+    timestamp = os.path.getmtime(opf)
+    return mi, timestamp, annotations
+
+
+def is_ebook_file(filename):
+    ext = os.path.splitext(filename)[1]
+    if not ext:
+        return False
+    ext = ext[1:].lower()
+    bad_ext_pat = re.compile(r'[^a-z0-9_]+')
+    if ext in NON_EBOOK_EXTENSIONS or bad_ext_pat.search(ext) is not None:
+        return False
+    return True
 
 
 class Restorer(Cache):
@@ -51,7 +71,6 @@ class Restore(Thread):
         self.src_library_path = os.path.abspath(library_path)
         self.progress_callback = progress_callback
         self.db_id_regexp = re.compile(r'^.* \((\d+)\)$')
-        self.bad_ext_pat = re.compile(r'[^a-z0-9_]+')
         if not callable(self.progress_callback):
             self.progress_callback = lambda x, y: x
         self.dirs = []
@@ -160,6 +179,8 @@ class Restore(Thread):
 
     def scan_library(self):
         for dirpath, dirnames, filenames in os.walk(self.src_library_path):
+            with suppress(ValueError):
+                dirnames.remove(TRASH_DIR_NAME)
             leaf = os.path.basename(dirpath)
             m = self.db_id_regexp.search(leaf)
             if m is None or 'metadata.opf' not in filenames:
@@ -176,29 +197,15 @@ class Restore(Thread):
                 self.failed_dirs.append((dirpath, traceback.format_exc()))
             self.progress_callback(_('Processed') + ' ' + dirpath, i+1)
 
-    def is_ebook_file(self, filename):
-        ext = os.path.splitext(filename)[1]
-        if not ext:
-            return False
-        ext = ext[1:].lower()
-        if ext in NON_EBOOK_EXTENSIONS or \
-                self.bad_ext_pat.search(ext) is not None:
-            return False
-        return True
-
     def process_dir(self, dirpath, filenames, book_id):
         book_id = int(book_id)
-        formats = list(filter(self.is_ebook_file, filenames))
+        formats = list(filter(is_ebook_file, filenames))
         fmts    = [os.path.splitext(x)[1][1:].upper() for x in formats]
         sizes   = [os.path.getsize(os.path.join(dirpath, x)) for x in formats]
         names   = [os.path.splitext(x)[0] for x in formats]
-        opf = os.path.join(dirpath, 'metadata.opf')
-        parsed_opf = OPF(opf, basedir=dirpath)
-        mi = parsed_opf.to_book_metadata()
-        annotations = tuple(parsed_opf.read_annotations())
-        timestamp = os.path.getmtime(opf)
-        path = os.path.relpath(dirpath, self.src_library_path).replace(os.sep,
-                '/')
+
+        mi, timestamp, annotations = read_opf(dirpath)
+        path = os.path.relpath(dirpath, self.src_library_path).replace(os.sep, '/')
 
         if int(mi.application_id) == book_id:
             self.books.append({

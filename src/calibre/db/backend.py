@@ -16,7 +16,9 @@ import sys
 import time
 import uuid
 from contextlib import closing, suppress
+from dataclasses import dataclass
 from functools import partial
+from typing import Sequence
 
 from calibre import as_unicode, force_unicode, isbytestring, prints
 from calibre.constants import (
@@ -24,7 +26,6 @@ from calibre.constants import (
 )
 from calibre.db import SPOOL_SIZE, FTSQueryError
 from calibre.db.annotations import annot_db_data, unicode_normalize
-from calibre.db.delete_service import delete_service
 from calibre.db.errors import NoSuchFormat
 from calibre.db.schema_upgrades import SchemaUpgrade
 from calibre.db.tables import (
@@ -36,6 +37,7 @@ from calibre.library.field_metadata import FieldMetadata
 from calibre.ptempfile import PersistentTemporaryFile, TemporaryFile
 from calibre.utils import pickle_binary_string, unpickle_binary_string
 from calibre.utils.config import from_json, prefs, to_json, tweaks
+from calibre.utils.copy_files import copy_files, copy_tree
 from calibre.utils.date import EPOCH, parse_date, utcfromtimestamp, utcnow
 from calibre.utils.filenames import (
     WindowsAtomicFolderMove, ascii_filename, atomic_rename, copyfile_using_links,
@@ -54,11 +56,23 @@ from polyglot.builtins import (
 
 # }}}
 
-
+COVER_FILE_NAME = 'cover.jpg'
+DEFAULT_TRASH_EXPIRY_TIME_SECONDS = 14 * 86400
+TRASH_DIR_NAME =  '.caltrash'
 BOOK_ID_PATH_TEMPLATE = ' ({})'
 CUSTOM_DATA_TYPES = frozenset(('rating', 'text', 'comments', 'datetime',
     'int', 'float', 'bool', 'series', 'composite', 'enumeration'))
 WINDOWS_RESERVED_NAMES = frozenset('CON PRN AUX NUL COM1 COM2 COM3 COM4 COM5 COM6 COM7 COM8 COM9 LPT1 LPT2 LPT3 LPT4 LPT5 LPT6 LPT7 LPT8 LPT9'.split())
+
+
+@dataclass
+class TrashEntry:
+    book_id: int
+    title: str
+    author: str
+    cover_path: str
+    mtime: float
+    formats: Sequence[str] = ()
 
 
 class DynamicFilter:  # {{{
@@ -498,8 +512,18 @@ class DB:
         self.initialize_tables()
         self.set_user_template_functions(compile_user_template_functions(
                                  self.prefs.get('user_template_functions', [])))
+        if self.prefs['last_expired_trash_at'] > 0:
+            self.ensure_trash_dir()
         if load_user_formatter_functions:
             set_global_state(self)
+
+    @property
+    def last_expired_trash_at(self) -> float:
+        return float(self.prefs['last_expired_trash_at'])
+
+    @last_expired_trash_at.setter
+    def last_expired_trash_at(self, val: float) -> None:
+        self.prefs['last_expired_trash_at'] = float(val)
 
     def get_template_functions(self):
         return self._template_functions
@@ -549,6 +573,8 @@ class DB:
         defs['similar_tags_match_kind'] = 'match_all'
         defs['similar_series_search_key'] = 'series'
         defs['similar_series_match_kind'] = 'match_any'
+        defs['last_expired_trash_at'] = 0.0
+        defs['expire_old_trash_after'] = DEFAULT_TRASH_EXPIRY_TIME_SECONDS
         defs['book_display_fields'] = [
         ('title', False), ('authors', True), ('series', True),
         ('identifiers', True), ('tags', True), ('formats', True),
@@ -1471,7 +1497,7 @@ class DB:
 
     def cover_abspath(self, book_id, path):
         path = os.path.join(self.library_path, path)
-        fmt_path = os.path.join(path, 'cover.jpg')
+        fmt_path = os.path.join(path, COVER_FILE_NAME)
         if os.path.exists(fmt_path):
             return fmt_path
 
@@ -1518,28 +1544,30 @@ class DB:
         atomic_rename(src_path, dest_path)
         return os.path.getsize(dest_path)
 
-    def remove_formats(self, remove_map):
-        paths = []
+    def remove_formats(self, remove_map, metadata_map):
+        self.ensure_trash_dir()
+        removed_map = {}
         for book_id, removals in iteritems(remove_map):
+            paths = set()
+            removed_map[book_id] = set()
             for fmt, fname, path in removals:
                 path = self.format_abspath(book_id, fmt, fname, path)
-                if path is not None:
-                    paths.append(path)
-        try:
-            delete_service().delete_files(paths, self.library_path)
-        except:
-            import traceback
-            traceback.print_exc()
+                if path:
+                    paths.add(path)
+                    removed_map[book_id].add(fmt.upper())
+            if paths:
+                self.move_book_files_to_trash(book_id, paths, metadata_map[book_id])
+        return removed_map
 
     def cover_last_modified(self, path):
-        path = os.path.abspath(os.path.join(self.library_path, path, 'cover.jpg'))
+        path = os.path.abspath(os.path.join(self.library_path, path, COVER_FILE_NAME))
         try:
             return utcfromtimestamp(os.stat(path).st_mtime)
         except OSError:
             pass  # Cover doesn't exist
 
     def copy_cover_to(self, path, dest, windows_atomic_move=None, use_hardlink=False, report_file_size=None):
-        path = os.path.abspath(os.path.join(self.library_path, path, 'cover.jpg'))
+        path = os.path.abspath(os.path.join(self.library_path, path, COVER_FILE_NAME))
         if windows_atomic_move is not None:
             if not isinstance(dest, string_or_bytes):
                 raise Exception('Error, you must pass the dest as a path when'
@@ -1582,7 +1610,7 @@ class DB:
         return False
 
     def cover_or_cache(self, path, timestamp):
-        path = os.path.abspath(os.path.join(self.library_path, path, 'cover.jpg'))
+        path = os.path.abspath(os.path.join(self.library_path, path, COVER_FILE_NAME))
         try:
             stat = os.stat(path)
         except OSError:
@@ -1603,7 +1631,7 @@ class DB:
             def progress_callback(book_id, old_sz, new_sz):
                 return None
         for book_id, path in path_map.items():
-            path = os.path.abspath(os.path.join(self.library_path, path, 'cover.jpg'))
+            path = os.path.abspath(os.path.join(self.library_path, path, COVER_FILE_NAME))
             try:
                 sz = os.path.getsize(path)
             except OSError:
@@ -1617,7 +1645,7 @@ class DB:
         path = os.path.abspath(os.path.join(self.library_path, path))
         if not os.path.exists(path):
             os.makedirs(path)
-        path = os.path.join(path, 'cover.jpg')
+        path = os.path.join(path, COVER_FILE_NAME)
         if callable(getattr(data, 'save', None)):
             from calibre.gui2 import pixmap_to_data
             data = pixmap_to_data(data)
@@ -1723,7 +1751,7 @@ class DB:
                     # rename rather than remove, so that if something goes
                     # wrong in the rest of this function, at least the file is
                     # not deleted
-                    os.rename(old_path, dest)
+                    os.replace(old_path, dest)
                 except OSError as e:
                     if getattr(e, 'errno', None) != errno.ENOENT:
                         # Failing to rename the old format will at worst leave a
@@ -1731,7 +1759,17 @@ class DB:
                         import traceback
                         traceback.print_exc()
 
-        if (not getattr(stream, 'name', False) or not samefile(dest, stream.name)):
+        if isinstance(stream, str) and stream:
+            try:
+                os.replace(stream, dest)
+            except OSError:
+                if iswindows:
+                    time.sleep(1)
+                    os.replace(stream, dest)
+                else:
+                    raise
+            size = os.path.getsize(dest)
+        elif (not getattr(stream, 'name', False) or not samefile(dest, stream.name)):
             with open(dest, 'wb') as f:
                 shutil.copyfileobj(stream, f)
                 size = f.tell()
@@ -1774,7 +1812,7 @@ class DB:
                 os.makedirs(tpath)
 
             if source_ok:  # Migrate existing files
-                dest = os.path.join(tpath, 'cover.jpg')
+                dest = os.path.join(tpath, COVER_FILE_NAME)
                 self.copy_cover_to(current_path, dest,
                         windows_atomic_move=wam, use_hardlink=True)
                 for fmt in formats:
@@ -1856,17 +1894,151 @@ class DB:
         with open(path, 'rb') as f:
             return f.read()
 
+    @property
+    def trash_dir(self):
+        return os.path.abspath(os.path.join(self.library_path, TRASH_DIR_NAME))
+
+    def ensure_trash_dir(self):
+        tdir = self.trash_dir
+        os.makedirs(os.path.join(tdir, 'b'), exist_ok=True)
+        os.makedirs(os.path.join(tdir, 'f'), exist_ok=True)
+        if iswindows:
+            import calibre_extensions.winutil as winutil
+            winutil.set_file_attributes(tdir, getattr(winutil, 'FILE_ATTRIBUTE_HIDDEN', 2) | getattr(winutil, 'FILE_ATTRIBUTE_NOT_CONTENT_INDEXED', 8192))
+        if time.time() - self.last_expired_trash_at >= 3600:
+            self.expire_old_trash()
+
+    def delete_trash_entry(self, book_id, category):
+        self.ensure_trash_dir()
+        path = os.path.join(self.trash_dir, category, str(book_id))
+        if os.path.exists(path):
+            self.rmtree(path)
+
+    def expire_old_trash(self, expire_age_in_seconds=-1):
+        if expire_age_in_seconds < 0:
+            expire_age_in_seconds = max(1 * 24 * 3600, float(self.prefs['expire_old_trash_after']))
+        self.last_expired_trash_at = now = time.time()
+        removals = []
+        for base in ('b', 'f'):
+            base = os.path.join(self.trash_dir, base)
+            for x in os.scandir(base):
+                try:
+                    st = x.stat(follow_symlinks=False)
+                    mtime = st.st_mtime
+                except OSError:
+                    mtime = 0
+                if mtime + expire_age_in_seconds <= now:
+                    removals.append(x.path)
+        for x in removals:
+            rmtree_with_retry(x)
+
+    def move_book_to_trash(self, book_id, book_dir_abspath):
+        dest = os.path.join(self.trash_dir, 'b', str(book_id))
+        if os.path.exists(dest):
+            rmtree_with_retry(dest)
+        copy_tree(book_dir_abspath, dest, delete_source=True)
+
+    def move_book_files_to_trash(self, book_id, format_abspaths, metadata):
+        dest = os.path.join(self.trash_dir, 'f', str(book_id))
+        if not os.path.exists(dest):
+            os.makedirs(dest)
+        fmap = {}
+        for path in format_abspaths:
+            ext = path.rpartition('.')[-1].lower()
+            fmap[path] = os.path.join(dest, ext)
+        with open(os.path.join(dest, 'metadata.json'), 'wb') as f:
+            f.write(json.dumps(metadata).encode('utf-8'))
+        copy_files(fmap, delete_source=True)
+
+    def get_metadata_for_trash_book(self, book_id, read_annotations=True):
+        from .restore import read_opf
+        bdir = os.path.join(self.trash_dir, 'b', str(book_id))
+        if not os.path.isdir(bdir):
+            raise ValueError(f'The book {book_id} not present in the trash folder')
+        mi, _, annotations = read_opf(bdir, read_annotations=read_annotations)
+        formats = []
+        for x in os.scandir(bdir):
+            if x.is_file() and x.name not in (COVER_FILE_NAME, 'metadata.opf') and '.' in x.name:
+                try:
+                    size = x.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+                fname, ext = os.path.splitext(x.name)
+                formats.append((ext[1:].upper(), size, fname))
+        return mi, annotations, formats
+
+    def move_book_from_trash(self, book_id, path):
+        bdir = os.path.join(self.trash_dir, 'b', str(book_id))
+        if not os.path.isdir(bdir):
+            raise ValueError(f'The book {book_id} not present in the trash folder')
+        dest = os.path.abspath(os.path.join(self.library_path, path))
+        copy_tree(bdir, dest, delete_source=True)
+
+    def path_for_trash_format(self, book_id, fmt):
+        bdir = os.path.join(self.trash_dir, 'f', str(book_id))
+        if not os.path.isdir(bdir):
+            return ''
+        path = os.path.join(bdir, fmt.lower())
+        if not os.path.exists(path):
+            path = ''
+        return path
+
+    def remove_trash_formats_dir_if_empty(self, book_id):
+        bdir = os.path.join(self.trash_dir, 'f', str(book_id))
+        if os.path.isdir(bdir) and len(os.listdir(bdir)) <= 1:  # dont count metadata.json
+            self.rmtree(bdir)
+
+    def list_trash_entries(self):
+        from calibre.ebooks.metadata.opf2 import OPF
+        self.ensure_trash_dir()
+        books, files = [], []
+        base = os.path.join(self.trash_dir, 'b')
+        unknown = _('Unknown')
+        au = (unknown,)
+        for x in os.scandir(base):
+            if x.is_dir(follow_symlinks=False):
+                try:
+                    book_id = int(x.name)
+                    mtime = x.stat(follow_symlinks=False).st_mtime
+                except Exception:
+                    continue
+                opf = OPF(os.path.join(x.path, 'metadata.opf'), basedir=x.path)
+                books.append(TrashEntry(book_id, opf.title or unknown, (opf.authors or au)[0], os.path.join(x.path, COVER_FILE_NAME), mtime))
+        base = os.path.join(self.trash_dir, 'f')
+        um = {'title': unknown, 'authors': au}
+        for x in os.scandir(base):
+            if x.is_dir(follow_symlinks=False):
+                try:
+                    book_id = int(x.name)
+                    mtime = x.stat(follow_symlinks=False).st_mtime
+                except Exception:
+                    continue
+                formats = set()
+                metadata = um
+                for f in os.scandir(x.path):
+                    if f.is_file(follow_symlinks=False):
+                        if f.name == 'metadata.json':
+                            with open(f.path, 'rb') as mf:
+                                metadata = json.loads(mf.read())
+                        else:
+                            formats.add(f.name.upper())
+                if formats:
+                    files.append(TrashEntry(book_id, metadata.get('title') or unknown, (metadata.get('authors') or au)[0], '', mtime, tuple(formats)))
+        return books, files
+
     def remove_books(self, path_map, permanent=False):
+        self.ensure_trash_dir()
         self.executemany(
             'DELETE FROM books WHERE id=?', [(x,) for x in path_map])
-        paths = {os.path.join(self.library_path, x) for x in itervalues(path_map) if x}
-        paths = {x for x in paths if os.path.exists(x) and self.is_deletable(x)}
-        if permanent:
-            for path in paths:
-                self.rmtree(path)
-                remove_dir_if_empty(os.path.dirname(path), ignore_metadata_caches=True)
-        else:
-            delete_service().delete_books(paths, self.library_path)
+        parent_paths = set()
+        for book_id, path in path_map.items():
+            if path:
+                path = os.path.abspath(os.path.join(self.library_path, path))
+                if os.path.exists(path) and self.is_deletable(path):
+                    self.rmtree(path) if permanent else self.move_book_to_trash(book_id, path)
+                    parent_paths.add(os.path.dirname(path))
+        for path in parent_paths:
+            remove_dir_if_empty(path, ignore_metadata_caches=True)
 
     def add_custom_data(self, name, val_map, delete_first):
         if delete_first:
@@ -2204,11 +2376,6 @@ class DB:
             pass
         self.conn  # Connect to the moved metadata.db
         progress(_('Completed'), total, total)
-
-    def restore_book(self, book_id, path, formats):
-        self.execute('UPDATE books SET path=? WHERE id=?', (path.replace(os.sep, '/'), book_id))
-        vals = [(book_id, fmt, size, name) for fmt, size, name in formats]
-        self.executemany('INSERT INTO data (book,format,uncompressed_size,name) VALUES (?,?,?,?)', vals)
 
     def backup_database(self, path):
         with closing(apsw.Connection(path)) as dest_db:
