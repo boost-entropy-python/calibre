@@ -7,10 +7,12 @@ __docformat__ = 'restructuredtext en'
 
 import glob
 import os
+from contextlib import suppress
 from datetime import timedelta
 from io import BytesIO
 from tempfile import NamedTemporaryFile
 
+from calibre.db.backend import METADATA_FILE_NAME
 from calibre.db.tests.base import IMG, BaseTest
 from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils.date import UNDEFINED_DATE, now, utcnow
@@ -298,6 +300,8 @@ class AddRemoveTest(BaseTest):
         fm_before = cache.format_metadata(1, 'FMT1', allow_cache=False), cache.format_metadata(1, 'FMT2', allow_cache=False)
         os.mkdir(os.path.join(bookpath, 'xyz'))
         open(os.path.join(bookpath, 'xyz', 'abc'), 'w').close()
+        with suppress(FileNotFoundError):
+            os.remove(os.path.join(bookpath, METADATA_FILE_NAME))
         cache.remove_books((1,))
         cache.move_book_from_trash(1)
         b, f = cache.list_trash_entries()
@@ -401,6 +405,7 @@ class AddRemoveTest(BaseTest):
         compare_field('uuid', self.assertNotEqual)
         self.assertEqual(src_db.all_annotations_for_book(1), dest_db.all_annotations_for_book(max(dest_db.all_book_ids())))
         rdata = copy_one_book(1, src_db, dest_db, preserve_date=False, preserve_uuid=True)
+        data_file_new_book_id = rdata['new_book_id']
         self.assertEqual(rdata, make_rdata(new_book_id=max(dest_db.all_book_ids())))
         compare_field('timestamp', self.assertNotEqual)
         compare_field('uuid')
@@ -422,7 +427,7 @@ class AddRemoveTest(BaseTest):
         for new_book_id in (1, 4, 5):
             self.assertEqual(dest_db.format(new_book_id, 'FMT1'), b'replaced')
         self.assertEqual(dest_db.format(rdata['new_book_id'], 'FMT1'), b'second-round')
-        bookdir = os.path.dirname(dest_db.format_abspath(1, '__COVER_INTERNAL__'))
+        bookdir = os.path.dirname(dest_db.format_abspath(data_file_new_book_id, '__COVER_INTERNAL__'))
         self.assertEqual('exf', open(os.path.join(bookdir, 'exf')).read())
         self.assertEqual('recurse', open(os.path.join(bookdir, 'sub', 'recurse')).read())
 
