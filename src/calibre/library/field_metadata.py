@@ -197,7 +197,7 @@ def _builtin_field_metadata():
                            'datatype':'int',
                            'is_multiple':{},
                            'kind':'field',
-                           'name':None,
+                           'name': _('Id'),
                            'search_terms':['id'],
                            'is_custom':False,
                            'is_category':False,
@@ -395,6 +395,7 @@ class FieldMetadata:
 
     # search labels that are not db columns
     search_items = ['all', 'search', 'vl', 'template']
+    custom_field_prefix = '#'
     __calibre_serializable__ = True
 
     def __init__(self):
@@ -411,13 +412,18 @@ class FieldMetadata:
             self._tb_cats[k]['display'] = {}
             self._tb_cats[k]['is_editable'] = True
             self._add_search_terms_to_map(k, v['search_terms'])
+        try:
+            for k, v in tweaks['alternate_column_names'].items():
+                if k in self._tb_cats and not self.is_custom_field(k):
+                    self._tb_cats[k]['name'] = v
+        except Exception:
+            traceback.print_exc()
         self._tb_cats['timestamp']['display'] = {
                         'date_format': tweaks['gui_timestamp_display_format']}
         self._tb_cats['pubdate']['display'] = {
                         'date_format': tweaks['gui_pubdate_display_format']}
         self._tb_cats['last_modified']['display'] = {
                         'date_format': tweaks['gui_last_modified_display_format']}
-        self.custom_field_prefix = '#'
         self.get = self._tb_cats.get
 
     def __getitem__(self, key):
