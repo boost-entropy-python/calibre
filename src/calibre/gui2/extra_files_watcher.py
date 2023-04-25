@@ -56,8 +56,8 @@ class ExtraFilesWatcher(QObject):
 
     def get_extra_files(self, book_id):
         db = self.gui.current_db.new_api
-        return tuple(ExtraFile(relpath, stat_result.st_mtime, stat_result.st_size) for
-                     relpath, file_path, stat_result in db.list_extra_files(book_id, pattern=DATA_FILE_PATTERN))
+        return tuple(ExtraFile(ef.relpath, ef.stat_result.st_mtime, ef.stat_result.st_size) for
+                     ef in db.list_extra_files(book_id, pattern=DATA_FILE_PATTERN))
 
     def check_registered_books(self):
         changed = {}
@@ -84,4 +84,5 @@ class ExtraFilesWatcher(QObject):
             self.timer.stop()
 
     def refresh_gui(self, book_ids):
-        self.gui.library_view.model().refresh_ids(frozenset(book_ids), current_row=self.gui.library_view.currentIndex().row())
+        lv = self.gui.library_view
+        lv.model().refresh_ids(frozenset(book_ids), current_row=lv.currentIndex().row())
