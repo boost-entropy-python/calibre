@@ -131,6 +131,7 @@ class HTMLInput(InputFormatPlugin):
         )
         from calibre.ebooks.oeb.transforms.metadata import meta_info_to_oeb_metadata
         from calibre.utils.localization import canonicalize_lang
+        self.opts = opts
         css_parser.log.setLevel(logging.WARN)
         self.OEB_STYLES = OEB_STYLES
         oeb = create_oebbook(log, None, opts, self,
@@ -268,7 +269,8 @@ class HTMLInput(InputFormatPlugin):
         q = os.path.normcase(get_long_path_name(link))
         if not q.startswith(self.root_dir_of_input):
             if not self.opts.allow_local_files_outside_root:
-                self.log.warn('Not adding {} as it is outside the document root: {}'.format(q, self.root_dir_of_input))
+                if os.path.exists(q):
+                    self.log.warn('Not adding {} as it is outside the document root: {}'.format(q, self.root_dir_of_input))
                 return None, None
         return link, frag
 
