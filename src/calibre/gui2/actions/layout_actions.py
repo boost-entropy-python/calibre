@@ -30,13 +30,9 @@ class LayoutActions(InterfaceAction):
 
     def gui_layout_complete(self):
         m = self.qaction.menu()
-        self.button_names = {}
         m.addAction(_('Hide all'), self.hide_all)
-        for i, name in enumerate(self.gui.button_order):
+        for button, name in zip(self.gui.layout_buttons, self.gui.button_order):
             m.addSeparator()
-            name = self.gui.button_order[i]
-            self.button_names[self.gui.button_order[i]] = i
-            button = self.gui.layout_buttons[i]
             ic = QIcon.ic(button.icname)
             m.addAction(ic, _('Show {}').format(button.label), partial(self.set_visible, Panel(name), True))
             m.addAction(ic, _('Hide {}').format(button.label), partial(self.set_visible, Panel(name), False))
@@ -53,9 +49,21 @@ class LayoutActions(InterfaceAction):
                 return b
 
     def set_visible(self, name: Panel, show=True):
+        '''
+        Show or hide the panel. Does nothing if the panel is already in the
+        desired state.
+
+        :param name: specifies which panel using a Panel enum
+        :param show: If True, show the panel, otherwise hide the panel
+        '''
         self._change_item(self._button_from_enum(name), show)
 
     def is_visible(self, name: Panel):
+        '''
+        Returns True if the panel is visible.
+
+        :param name: specifies which panel using a Panel enum
+        '''
         self._button_from_enum(name).isChecked()
 
     def hide_all(self):
@@ -65,3 +73,13 @@ class LayoutActions(InterfaceAction):
     def show_all(self):
         for name in self.gui.button_order:
             self.set_visible(Panel(name), show=True)
+
+    def panel_titles(self):
+        '''
+        Return a dictionary of Panel Enum items to translated human readable title.
+        Simplifies building dialogs, for example combo boxes of all the panel
+        names or check boxes for each panel.
+
+        :return: {Panel_enum_value: human readable title, ...}
+        '''
+        return {p: self._button_from_enum(p).label for p in Panel}
