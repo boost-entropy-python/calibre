@@ -13,9 +13,11 @@ class Image {
     charbuff buf;
     int64_t width, height;
     PdfReference ref;
+    PdfReference smask;
+    bool is_valid;
+
     Image( const Image & ) ;
     Image & operator=( const Image & ) ;
-    bool is_valid;
 
     public:
         Image(const PdfReference &reference, const PdfObject *o) : buf(), width(0), height(0), ref(reference) {
@@ -30,18 +32,20 @@ class Image {
             const PdfDictionary &dict = o->GetDictionary();
             if (dict.HasKey("Width") && dict.GetKey("Width")->IsNumber()) width = dict.GetKey("Width")->GetNumber();
             if (dict.HasKey("Height") && dict.GetKey("Height")->IsNumber()) height = dict.GetKey("Height")->GetNumber();
+            if (dict.HasKey("SMask") && dict.GetKey("SMask")->IsReference()) smask = dict.GetKey("SMask")->GetReference();
         }
         Image(Image &&other) noexcept :
-            buf(std::move(other.buf)), width(other.width), height(other.height), ref(other.ref) {
+            buf(std::move(other.buf)), width(other.width), height(other.height), ref(other.ref), smask(other.smask) {
             other.buf = charbuff(); is_valid = other.is_valid;
         }
         Image& operator=(Image &&other) noexcept {
             buf = std::move(other.buf); other.buf = charbuff(); ref = other.ref;
             width = other.width; height = other.height; is_valid = other.is_valid;
+            smask = other.smask;
             return *this;
         }
         bool operator==(const Image &other) const noexcept {
-            return other.width == width && is_valid && other.is_valid && other.height == height && other.buf == buf;
+            return other.width == width && is_valid && other.is_valid && other.height == height && other.smask == smask && other.buf == buf;
         }
         std::size_t hash() const noexcept { return buf.size(); }
         const PdfReference& reference() const noexcept { return ref; }
@@ -78,7 +82,7 @@ dedup_images(PDFDoc *self, PyObject *args) {
             const PdfReference &canonical_ref = x.first.reference();
             for (auto &ref : x.second) {
                 if (ref != canonical_ref) {
-                    ref_map[ref] = x.first.reference();
+                    ref_map[ref] = canonical_ref;
                     objects.RemoveObject(ref).reset();
                     count++;
                 }
@@ -106,10 +110,14 @@ dedup_images(PDFDoc *self, PyObject *args) {
                     }
                 }
                 if (changed) resources.AddKey("XObject", new_xobject);
+            } else if (dictionary_has_key_name(dict, PdfName::KeyType, "XObject") && dictionary_has_key_name(dict, PdfName::KeySubtype, "Image") && dict.HasKey("SMask") && dict.MustGetKey("SMask").IsReference()) {
+                try {
+                    const PdfReference &r = ref_map.at(dict.MustGetKey("SMask").GetReference());
+                    dict.AddKey("SMask", r);
+                } catch (const std::out_of_range &err) { (void)err; }
             }
         }
     }
-
     return Py_BuildValue("k", count);
 
 }
